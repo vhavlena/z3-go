@@ -400,6 +400,7 @@ func (ctx *Context) App(f FuncDecl, args ...AST) AST {
 type Constructor struct {
 	ctx *Context
 	c   C.Z3_constructor
+	n   int // number of fields for this constructor
 }
 
 // ADTField describes a field name and sort for a constructor (non-recursive).
@@ -433,7 +434,7 @@ func (ctx *Context) MkConstructor(name, recognizer string, fields []ADTField) *C
 		sortRefs = (*C.uint)(unsafe.Pointer(&refs[0]))
 	}
 	c := C.Z3_mk_constructor(ctx.c, symName, symRec, C.uint(n), fieldSyms, fieldSorts, sortRefs)
-	return &Constructor{ctx: ctx, c: c}
+	return &Constructor{ctx: ctx, c: c, n: n}
 }
 
 // ADTConstructorDecl contains the usable function declarations extracted from a constructor.
@@ -460,8 +461,8 @@ func (ctx *Context) MkDatatype(name string, ctors []*Constructor) (Sort, []ADTCo
 	decls := make([]ADTConstructorDecl, n)
 	for i := 0; i < n; i++ {
 		k := ctors[i]
-		// get number of fields
-		nf := int(C.Z3_constructor_num_fields(ctx.c, k.c))
+		// number of fields known from creation
+		nf := k.n
 		var fdecl C.Z3_func_decl
 		var rdecl C.Z3_func_decl
 		var acc *C.Z3_func_decl
