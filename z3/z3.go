@@ -23,6 +23,7 @@ import "C"
 import (
 	"errors"
 	"runtime"
+	"strconv"
 	"unsafe"
 )
 
@@ -146,7 +147,11 @@ func (ctx *Context) Const(name string, s Sort) AST {
 
 // IntVal creates an integer numeral.
 func (ctx *Context) IntVal(v int64) AST {
-	a := C.Z3_mk_int64(ctx.c, C.longlong(v), ctx.IntSort().s)
+	// Use string-based numeral creation to avoid platform-dependent C integer types.
+	s := strconv.FormatInt(v, 10)
+	cstr := C.CString(s)
+	defer C.free(unsafe.Pointer(cstr))
+	a := C.Z3_mk_numeral(ctx.c, cstr, ctx.IntSort().s)
 	C.Z3_inc_ref(ctx.c, a)
 	return AST{ctx, a}
 }
