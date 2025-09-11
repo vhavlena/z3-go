@@ -18,6 +18,14 @@ static Z3_symbol mk_str_symbol(Z3_context c, const char* s) {
 static int model_eval_wrap(Z3_context c, Z3_model m, Z3_ast a, int model_completion, Z3_ast* out) {
 	return Z3_model_eval(c, m, a, model_completion, out);
 }
+
+// Install a no-op error handler so Z3 doesn't abort on errors; we'll query errors from Go.
+void go_z3_error_handler(Z3_context c, Z3_error_code e) {
+	// no-op
+}
+static void z3_set_noop_error_handler(Z3_context c) {
+	Z3_set_error_handler(c, go_z3_error_handler);
+}
 */
 import "C"
 import (
@@ -75,6 +83,8 @@ func NewContext(cfg *Config) *Context {
 		c = C.Z3_mk_context(tmp)
 		C.Z3_del_config(tmp)
 	}
+	// Ensure errors are reported via error codes/messages instead of aborting.
+	C.z3_set_noop_error_handler(c)
 	ctx := &Context{c: c}
 	runtime.SetFinalizer(ctx, func(x *Context) { x.Close() })
 	return ctx

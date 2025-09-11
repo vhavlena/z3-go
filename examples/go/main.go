@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	// Using the stub types unless built with -tags z3binding
+	// Using the stub types because cgo is disabled.
 	_ = z3.Unknown
-	fmt.Println("Go Z3 prototype example. Build with -tags z3binding to run real solver.")
+	fmt.Println("Go Z3 example. Enable cgo (CGO_ENABLED=1) and have Z3 installed to run the real solver.")
 }
