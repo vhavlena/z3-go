@@ -211,3 +211,65 @@ func TestSMTLIB2FromFile(t *testing.T) {
 		t.Fatalf("SolveSMTLIB2File expected sat, got %v err %v", res2, err)
 	}
 }
+
+func TestForall(t *testing.T) {
+	cfg := NewConfig()
+
+	defer cfg.Close()
+	ctx := NewContext(cfg)
+	defer ctx.Close()
+
+	s := ctx.NewSolver()
+	s.SetOption("smt.mbqi", true)
+	s.SetOption("smt.qi.eager_threshold", 5)
+	s.SetOption("smt.qi.max_instances", 500)
+	defer s.Close()
+
+	smt := `
+
+; Removed (set-logic ALL) to let Z3 auto-config heuristics pick a faster tactic.
+
+(set-logic ALL)
+	
+(declare-datatypes ()
+	((OAtom
+		(OString (str String))
+		(ONumber (num Int))
+		(OBoolean (bool Bool))
+		ONull
+		OUndef
+	))
+)
+
+(declare-datatypes (T)
+	((OGenType
+		(Atom (atom OAtom))
+		(OObj (obj (Array String T)))
+		(OArray (arr (Array Int T)))
+	))
+)
+
+(declare-datatypes ()
+  ((OGenTypeAtom (Atom (atom OAtom)) ))
+)
+(define-sort OTypeD0 () (OGenType OGenTypeAtom))
+(define-sort OTypeD1 () (OGenType OTypeD0))
+(declare-fun x () OTypeD1)
+(assert (and (is-OString (atom (select (obj x) "a"))) (forall ((BV7Yu String)) (let ((BUi0B (select (obj x) BV7Yu))) (or (= BV7Yu "a") (and (is-Atom BUi0B) (is-OUndef (atom BUi0B))))))))
+	`
+
+	if err := s.AssertSMTLIB2String(smt); err != nil {
+		t.Fatalf("parse/assert smtlib2 string: %v", err)
+	}
+	res, err := s.Check()
+	if err != nil || res != Sat {
+		t.Fatalf("expected sat, got %v err %v", res, err)
+	}
+
+	// also via convenience method
+	s2 := ctx.NewSolver()
+	defer s2.Close()
+	if res2, err := s2.SolveSMTLIB2String(smt); err != nil || res2 != Sat {
+		t.Fatalf("SolveSMTLIB2String expected sat, got %v err %v", res2, err)
+	}
+}
