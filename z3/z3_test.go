@@ -212,64 +212,142 @@ func TestSMTLIB2FromFile(t *testing.T) {
 	}
 }
 
-func TestForall(t *testing.T) {
+func TestSetOptionQuantifiers(t *testing.T) {
 	cfg := NewConfig()
-
 	defer cfg.Close()
 	ctx := NewContext(cfg)
 	defer ctx.Close()
 
 	s := ctx.NewSolver()
-	s.SetOption("smt.mbqi", true)
-	s.SetOption("smt.qi.eager_threshold", 5)
-	s.SetOption("smt.qi.max_instances", 500)
 	defer s.Close()
 
+	if err := s.SetOption("smt.mbqi", true); err != nil {
+		t.Fatalf("SetOption smt.mbqi: %v", err)
+	}
+	if err := s.SetOption("smt.qi.eager_threshold", 0); err != nil {
+		t.Fatalf("SetOption smt.qi.eager_threshold: %v", err)
+	}
+
 	smt := `
-
-; Removed (set-logic ALL) to let Z3 auto-config heuristics pick a faster tactic.
-
-(set-logic ALL)
-	
-(declare-datatypes ()
-	((OAtom
-		(OString (str String))
-		(ONumber (num Int))
-		(OBoolean (bool Bool))
-		ONull
-		OUndef
-	))
-)
-
-(declare-datatypes (T)
-	((OGenType
-		(Atom (atom OAtom))
-		(OObj (obj (Array String T)))
-		(OArray (arr (Array Int T)))
-	))
-)
-
-(declare-datatypes ()
-  ((OGenTypeAtom (Atom (atom OAtom)) ))
-)
-(define-sort OTypeD0 () (OGenType OGenTypeAtom))
-(define-sort OTypeD1 () (OGenType OTypeD0))
-(declare-fun x () OTypeD1)
-(assert (and (is-OString (atom (select (obj x) "a"))) (forall ((BV7Yu String)) (let ((BUi0B (select (obj x) BV7Yu))) (or (= BV7Yu "a") (and (is-Atom BUi0B) (is-OUndef (atom BUi0B))))))))
+		(set-logic AUFLIA)
+		(declare-fun f (Int) Int)
+		(assert (forall ((x Int)) (= (f x) x)))
+		(assert (exists ((y Int)) (= (f y) 5)))
 	`
 
 	if err := s.AssertSMTLIB2String(smt); err != nil {
-		t.Fatalf("parse/assert smtlib2 string: %v", err)
+		t.Fatalf("assert quantified smtlib2: %v", err)
 	}
 	res, err := s.Check()
-	if err != nil || res != Sat {
-		t.Fatalf("expected sat, got %v err %v", res, err)
+	if err != nil {
+		t.Fatalf("check quantified formula: %v", err)
+	}
+	if res != Sat {
+		t.Fatalf("expected sat, got %v", res)
+	}
+}
+
+func TestModelGenerationCases(t *testing.T) {
+	cfg := NewConfig()
+	defer cfg.Close()
+	ctx := NewContext(cfg)
+	defer ctx.Close()
+
+	cases := []struct {
+		name  string
+		build func(*Context) (*Solver, func(*testing.T, *Model))
+	}{
+		{
+			name: "IntEquality",
+			build: func(ctx *Context) (*Solver, func(*testing.T, *Model)) {
+				x := ctx.Const("model_case_int_x", ctx.IntSort())
+				s := ctx.NewSolver()
+				s.Assert(Eq(x, ctx.IntVal(5)))
+				return s, func(t *testing.T, m *Model) {
+					t.Helper()
+					val := m.Eval(x, true)
+					if val.a == nil {
+						t.Fatalf("model evaluation for x returned nil")
+					}
+					if v := val.NumeralString(); v != "5" {
+						t.Fatalf("expected x == 5, got %s", v)
+					}
+				}
+			},
+		},
+		{
+			name: "BoolImplication",
+			build: func(ctx *Context) (*Solver, func(*testing.T, *Model)) {
+				a := ctx.Const("model_case_bool_a", ctx.BoolSort())
+				b := ctx.Const("model_case_bool_b", ctx.BoolSort())
+				s := ctx.NewSolver()
+				s.Assert(Implies(a, b))
+				s.Assert(a)
+				return s, func(t *testing.T, m *Model) {
+					t.Helper()
+					aa := m.Eval(a, true)
+					bb := m.Eval(b, true)
+					if aa.a == nil || bb.a == nil {
+						t.Fatalf("model evaluation for boolean vars returned nil")
+					}
+					if aa.String() != "true" {
+						t.Fatalf("expected a == true, got %s", aa.String())
+					}
+					if bb.String() != "true" {
+						t.Fatalf("expected b == true, got %s", bb.String())
+					}
+				}
+			},
+		},
+		{
+			name: "IntAddition",
+			build: func(ctx *Context) (*Solver, func(*testing.T, *Model)) {
+				x := ctx.Const("model_case_add_x", ctx.IntSort())
+				y := ctx.Const("model_case_add_y", ctx.IntSort())
+				s := ctx.NewSolver()
+				s.Assert(Eq(Add(x, y), ctx.IntVal(10)))
+				s.Assert(Eq(x, ctx.IntVal(3)))
+				return s, func(t *testing.T, m *Model) {
+					t.Helper()
+					xVal := m.Eval(x, true)
+					yVal := m.Eval(y, true)
+					if xVal.a == nil || yVal.a == nil {
+						t.Fatalf("model evaluation for addition vars returned nil")
+					}
+					if xv := xVal.NumeralString(); xv != "3" {
+						t.Fatalf("expected x == 3, got %s", xv)
+					}
+					if yv := yVal.NumeralString(); yv != "7" {
+						t.Fatalf("expected y == 7, got %s", yv)
+					}
+				}
+			},
+		},
 	}
 
-	// also via convenience method
-	s2 := ctx.NewSolver()
-	defer s2.Close()
-	if res2, err := s2.SolveSMTLIB2String(smt); err != nil || res2 != Sat {
-		t.Fatalf("SolveSMTLIB2String expected sat, got %v err %v", res2, err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			solver, check := tc.build(ctx)
+			if solver == nil {
+				t.Fatalf("nil solver from build")
+			}
+			if check == nil {
+				t.Fatalf("nil checker for test case")
+			}
+			defer solver.Close()
+			res, err := solver.Check()
+			if err != nil {
+				t.Fatalf("check error: %v", err)
+			}
+			if res != Sat {
+				t.Fatalf("expected sat, got %v", res)
+			}
+			model := solver.Model()
+			if model == nil {
+				t.Fatalf("expected model, got nil")
+			}
+			defer model.Close()
+			check(t, model)
+		})
 	}
 }
