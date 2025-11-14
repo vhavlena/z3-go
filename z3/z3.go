@@ -30,6 +30,7 @@ static void z3_set_noop_error_handler(Z3_context c) {
 import "C"
 import (
 	"errors"
+	"fmt"
 	"runtime"
 	"strconv"
 	"unsafe"
@@ -50,6 +51,12 @@ func NewConfig() *Config {
 	C.Z3_set_param_value(cfg.cfg, k, v)
 	C.free(unsafe.Pointer(k))
 	C.free(unsafe.Pointer(v))
+	// Enable auto configuration similar to command-line default.
+	k2 := C.CString("auto_config")
+	v2 := C.CString("true")
+	C.Z3_set_param_value(cfg.cfg, k2, v2)
+	C.free(unsafe.Pointer(k2))
+	C.free(unsafe.Pointer(v2))
 	return cfg
 }
 
@@ -385,7 +392,53 @@ func (s *Solver) Close() {
 	}
 }
 
+// SetGlobalParam sets a global Z3 parameter (affects all contexts/solvers subsequently).
+// This is a thin wrapper over Z3_set_param_value for common tuning like "timeout".
+func SetGlobalParam(key, value string) {
+	k := C.CString(key)
+	v := C.CString(value)
+	C.Z3_set_param_value(nil, k, v) // nil context allowed for global set
+	C.free(unsafe.Pointer(k))
+	C.free(unsafe.Pointer(v))
+}
+
 func (s *Solver) Assert(a AST) { C.Z3_solver_assert(s.ctx.c, s.s, a.a) }
+
+// SetOption applies an SMT-LIB2 (set-option) command to the solver by parsing it.
+// This is a lightweight way to configure quantifier/search parameters after creation.
+// Example: s.SetOption("mbqi", true), s.SetOption("qi.eager_threshold", 5).
+// It returns an error if Z3 rejects the option name or value.
+func (s *Solver) SetOption(name string, value interface{}) error {
+	if s == nil || s.s == nil {
+		return errors.New("nil solver")
+	}
+	var valStr string
+	switch v := value.(type) {
+	case string:
+		// For symbol-valued options we pass as-is; for others assume they don't need quotes.
+		valStr = v
+	case bool:
+		if v {
+			valStr = "true"
+		} else {
+			valStr = "false"
+		}
+	case int, int32, int64:
+		valStr = fmt.Sprintf("%d", v)
+	case uint, uint32, uint64:
+		valStr = fmt.Sprintf("%d", v)
+	case float32, float64:
+		valStr = fmt.Sprintf("%v", v)
+	default:
+		return fmt.Errorf("unsupported option value type %T", v)
+	}
+	cmd := fmt.Sprintf("(set-option :%s %s)", name, valStr)
+	// Re-use SMT-LIB parser. It may produce warnings/errors for unknown options.
+	if err := s.AssertSMTLIB2String(cmd); err != nil {
+		return err
+	}
+	return nil
+}
 
 // Push creates a new solver scope.
 func (s *Solver) Push() { C.Z3_solver_push(s.ctx.c, s.s) }
@@ -524,6 +577,18 @@ func (s *Solver) Check() (CheckResult, error) {
 		}
 		return Unknown, errors.New("unknown")
 	}
+}
+
+// ReasonUnknown returns the textual reason if the last check produced "unknown".
+func (s *Solver) ReasonUnknown() string {
+	if s == nil || s.s == nil {
+		return ""
+	}
+	rstr := C.Z3_solver_get_reason_unknown(s.ctx.c, s.s)
+	if rstr == nil {
+		return ""
+	}
+	return C.GoString(rstr)
 }
 
 func (s *Solver) Model() *Model {
