@@ -9,7 +9,8 @@ This aims to be a small, idiomatic wrapper over the Z3 C API, suitable to be use
 
 ## Layout
 - `z3/` — Go package `z3`
-- `examples/go` — tiny example program
+- `examples/go` — tiny solver example (cgo)
+- `examples/go/ast` — AST creation/traversal demo (cgo)
 
 ## Requirements
 - Go 1.20+
@@ -87,11 +88,22 @@ Run tests:
 go test ./z3 -v
 ```
 
-Run the example:
+Run the solver example:
 
 ```bash
-go run ./examples/go
+go run ./examples/solve/solve.go
 ```
+
+## AST helpers & example
+
+The package exposes helpers for inspecting `z3.AST` values (`Kind`, `Decl`, `Children`, `Walk`, `AsInt64`, `AsStringLiteral`, etc.).
+To see them in action, run the AST demo (requires cgo and a local Z3 install):
+
+```bash
+go run ./examples/ast
+```
+
+The program builds a small arithmetic formula, prints its tree structure, checks it with a solver, and walks the model value of `x` to show how to recover concrete numerals/strings from the resulting ASTs.
 
 ### Troubleshooting linking
 - If Z3 is installed but not found, check `pkg-config --libs z3` works. If not, set `PKG_CONFIG_PATH` to include the directory with `z3.pc`.
