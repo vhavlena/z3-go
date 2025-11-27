@@ -258,7 +258,7 @@ func (a AST) AsInt64() (int64, bool) {
 	if a.Kind() != ASTKindNumeral {
 		return 0, false
 	}
-	var out C.longlong
+	var out C.int64_t
 	if bool(C.Z3_get_numeral_int64(a.ctx.c, a.a, &out)) {
 		return int64(out), true
 	}
