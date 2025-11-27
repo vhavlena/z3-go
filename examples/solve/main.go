@@ -12,5 +12,5 @@ import (
 func main() {
 	// Using the stub types because cgo is disabled.
 	_ = z3.Unknown
-	fmt.Println("Go Z3 example. Enable cgo (CGO_ENABLED=1) and have Z3 installed to run the real solver.")
+	fmt.Println("Go Z3 examples require cgo. Enable CGO_ENABLED=1 and install Z3, then run `go run ./examples/solve/solve.go` or `go run ./examples/ast/main.go`.")
 }
