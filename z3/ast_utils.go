@@ -171,6 +171,18 @@ func (a AST) Decl() FuncDecl {
 	return FuncDecl{ctx: a.ctx, d: decl}
 }
 
+// Sort returns the Z3 sort associated with the AST.
+func (a AST) Sort() Sort {
+	if a.ctx == nil || a.a == nil {
+		return Sort{}
+	}
+	s := C.Z3_get_sort(a.ctx.c, a.a)
+	if s == nil {
+		return Sort{}
+	}
+	return Sort{ctx: a.ctx, s: s}
+}
+
 // Kind returns the declaration kind.
 func (d FuncDecl) Kind() DeclKind {
 	if d.ctx == nil || d.d == nil {
@@ -324,5 +336,6 @@ func (ctx *Context) ParseSMTLIB2String(input string) ([]AST, error) {
 		C.Z3_inc_ref(ctx.c, a)
 		out = append(out, AST{ctx: ctx, a: a})
 	}
+	ctx.recordSortsFromASTs(out)
 	return out, nil
 }

@@ -37,7 +37,12 @@ import (
 )
 
 // Context wraps Z3_context.
-type Context struct{ c C.Z3_context }
+type Context struct {
+	c          C.Z3_context
+	namedSorts map[string]Sort
+	declSorts  map[string]Sort
+	funcDecls  map[string]FuncDecl
+}
 
 // Config wraps Z3_config.
 type Config struct{ cfg C.Z3_config }
@@ -92,7 +97,7 @@ func NewContext(cfg *Config) *Context {
 	}
 	// Ensure errors are reported via error codes/messages instead of aborting.
 	C.z3_set_noop_error_handler(c)
-	ctx := &Context{c: c}
+	ctx := &Context{c: c, namedSorts: make(map[string]Sort), declSorts: make(map[string]Sort), funcDecls: make(map[string]FuncDecl)}
 	runtime.SetFinalizer(ctx, func(x *Context) { x.Close() })
 	return ctx
 }
@@ -102,6 +107,11 @@ func (ctx *Context) Close() {
 	if ctx != nil && ctx.c != nil {
 		C.Z3_del_context(ctx.c)
 		ctx.c = nil
+	}
+	if ctx != nil {
+		ctx.namedSorts = nil
+		ctx.declSorts = nil
+		ctx.funcDecls = nil
 	}
 }
 
@@ -136,16 +146,60 @@ type Model struct {
 }
 
 // BoolSort returns the boolean sort.
-func (ctx *Context) BoolSort() Sort { return Sort{ctx, C.Z3_mk_bool_sort(ctx.c)} }
+func (ctx *Context) BoolSort() Sort {
+	s := Sort{ctx, C.Z3_mk_bool_sort(ctx.c)}
+	ctx.rememberSort(s)
+	return s
+}
 
 // IntSort returns the integer sort.
-func (ctx *Context) IntSort() Sort { return Sort{ctx, C.Z3_mk_int_sort(ctx.c)} }
+func (ctx *Context) IntSort() Sort {
+	s := Sort{ctx, C.Z3_mk_int_sort(ctx.c)}
+	ctx.rememberSort(s)
+	return s
+}
 
 // RealSort returns the real sort.
-func (ctx *Context) RealSort() Sort { return Sort{ctx, C.Z3_mk_real_sort(ctx.c)} }
+func (ctx *Context) RealSort() Sort {
+	s := Sort{ctx, C.Z3_mk_real_sort(ctx.c)}
+	ctx.rememberSort(s)
+	return s
+}
 
 // StringSort returns the string sort (sequence of characters).
-func (ctx *Context) StringSort() Sort { return Sort{ctx, C.Z3_mk_string_sort(ctx.c)} }
+func (ctx *Context) StringSort() Sort {
+	s := Sort{ctx, C.Z3_mk_string_sort(ctx.c)}
+	ctx.rememberSort(s)
+	return s
+}
+
+// NamedSort returns a previously recorded sort reference by its symbolic name or printed form.
+func (ctx *Context) NamedSort(name string) (Sort, bool) {
+	if ctx == nil || name == "" {
+		return Sort{}, false
+	}
+	if ctx.namedSorts == nil {
+		return Sort{}, false
+	}
+	s, ok := ctx.namedSorts[name]
+	return s, ok
+}
+
+// ConstDecl recreates a constant with the given name using a recorded sort.
+// This is useful for SMT-LIB inputs where the declaration occurs in parsed scripts.
+func (ctx *Context) ConstDecl(name string) (AST, bool) {
+	if ctx == nil || ctx.c == nil || name == "" {
+		return AST{}, false
+	}
+	if ctx.declSorts == nil {
+		return AST{}, false
+	}
+	s, ok := ctx.declSorts[name]
+	if !ok || s.s == nil {
+		return AST{}, false
+	}
+	return ctx.Const(name, s), true
+}
 
 // StringSymbol creates a symbol from string.
 func (ctx *Context) StringSymbol(name string) C.Z3_symbol {
@@ -159,7 +213,85 @@ func (ctx *Context) Const(name string, s Sort) AST {
 	sym := ctx.StringSymbol(name)
 	a := C.Z3_mk_const(ctx.c, sym, s.s)
 	C.Z3_inc_ref(ctx.c, a)
+	ctx.rememberSort(s)
+	ctx.rememberDeclSort(name, s)
 	return AST{ctx, a}
+}
+
+func (ctx *Context) rememberDeclSort(name string, s Sort) {
+	if ctx == nil || s.s == nil || name == "" {
+		return
+	}
+	if ctx.declSorts == nil {
+		ctx.declSorts = make(map[string]Sort)
+	}
+	if _, exists := ctx.declSorts[name]; !exists {
+		ctx.declSorts[name] = s
+	}
+}
+
+func (ctx *Context) rememberSort(s Sort) {
+	if ctx == nil || s.s == nil {
+		return
+	}
+	ctx.storeSortByKey(s, s.Name())
+	ctx.storeSortByKey(s, s.String())
+}
+
+func (ctx *Context) storeSortByKey(s Sort, key string) {
+	if ctx == nil || s.s == nil || key == "" {
+		return
+	}
+	if ctx.namedSorts == nil {
+		ctx.namedSorts = make(map[string]Sort)
+	}
+	if _, exists := ctx.namedSorts[key]; !exists {
+		ctx.namedSorts[key] = s
+	}
+}
+
+func (ctx *Context) recordSortsFromASTs(nodes []AST) {
+	for _, node := range nodes {
+		ctx.recordSortsFromAST(node)
+	}
+}
+
+func (ctx *Context) recordSortsFromAST(root AST) {
+	if ctx == nil || root.ctx == nil || root.a == nil {
+		return
+	}
+	root.Walk(func(node AST) bool {
+		if node.ctx == nil || node.a == nil {
+			return true
+		}
+		s := node.Sort()
+		ctx.rememberSort(s)
+		if node.IsApp() && node.NumChildren() == 0 {
+			ctx.rememberDeclSort(node.Decl().Name(), s)
+		}
+		if node.IsApp() {
+			decl := node.Decl()
+			name := decl.Name()
+			if name != "" {
+				if ctx.funcDecls == nil {
+					ctx.funcDecls = make(map[string]FuncDecl)
+				}
+				if _, ok := ctx.funcDecls[name]; !ok {
+					ctx.funcDecls[name] = decl
+				}
+			}
+		}
+		return true
+	})
+}
+
+// FuncDeclByName returns a previously encountered function declaration by name.
+func (ctx *Context) FuncDeclByName(name string) (FuncDecl, bool) {
+	if ctx == nil || name == "" || ctx.funcDecls == nil {
+		return FuncDecl{}, false
+	}
+	decl, ok := ctx.funcDecls[name]
+	return decl, ok
 }
 
 // IntVal creates an integer numeral.
@@ -310,6 +442,14 @@ func Ge(x, y AST) AST {
 func Gt(x, y AST) AST {
 	ctx := x.ctx
 	a := C.Z3_mk_gt(ctx.c, x.a, y.a)
+	C.Z3_inc_ref(ctx.c, a)
+	return AST{ctx, a}
+}
+
+// Select returns (select array index).
+func Select(array AST, index AST) AST {
+	ctx := array.ctx
+	a := C.Z3_mk_select(ctx.c, array.a, index.a)
 	C.Z3_inc_ref(ctx.c, a)
 	return AST{ctx, a}
 }
@@ -552,7 +692,9 @@ func (ctx *Context) MkDatatype(name string, ctors []*Constructor) (Sort, []ADTCo
 	}
 	// Increase ref to returned sort
 	// Note: Z3_mk_datatype returns a sort associated with the context; no extra inc needed for sort objects.
-	return Sort{ctx, srt}, decls
+	sort := Sort{ctx, srt}
+	ctx.rememberSort(sort)
+	return sort, decls
 }
 
 type CheckResult int
@@ -649,11 +791,23 @@ func (a AST) String() string {
 }
 
 func (s Sort) String() string {
+	if s.ctx == nil || s.s == nil {
+		return ""
+	}
 	str := C.Z3_sort_to_string(s.ctx.c, s.s)
 	if str == nil {
 		return "<invalid-sort>"
 	}
 	return C.GoString(str)
+}
+
+// Name returns the symbolic name of the sort if available.
+func (s Sort) Name() string {
+	if s.ctx == nil || s.s == nil {
+		return ""
+	}
+	sym := C.Z3_get_sort_name(s.ctx.c, s.s)
+	return symbolToString(s.ctx, sym)
 }
 
 // NumeralString returns a textual numeral if the AST is numeric; otherwise a string form.
@@ -693,6 +847,7 @@ func (s *Solver) AssertSMTLIB2String(input string) error {
 	for i := 0; i < n; i++ {
 		a := C.Z3_ast_vector_get(s.ctx.c, vec, C.uint(i))
 		if a != nil {
+			s.ctx.recordSortsFromAST(AST{ctx: s.ctx, a: a})
 			C.Z3_solver_assert(s.ctx.c, s.s, a)
 		}
 	}
@@ -722,6 +877,7 @@ func (s *Solver) AssertSMTLIB2File(path string) error {
 	for i := 0; i < n; i++ {
 		a := C.Z3_ast_vector_get(s.ctx.c, vec, C.uint(i))
 		if a != nil {
+			s.ctx.recordSortsFromAST(AST{ctx: s.ctx, a: a})
 			C.Z3_solver_assert(s.ctx.c, s.s, a)
 		}
 	}
