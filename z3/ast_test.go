@@ -148,32 +148,17 @@ func TestASTModelValueFromDatatype(t *testing.T) {
 
 	s := ctx.NewSolver()
 	defer s.Close()
-	asts, err := ctx.ParseSMTLIB2String(script)
-	if err != nil {
-		t.Fatalf("ParseSMTLIB2String error: %v", err)
-	}
-	var strRef AST
-	for _, f := range asts {
-		found := false
-		f.Walk(func(node AST) bool {
-			if node.IsApp() && node.NumChildren() == 0 {
-				if decl := node.Decl(); decl.Name() == "str_val" {
-					strRef = node
-					found = true
-					return false
-				}
-			}
-			return true
-		})
-		if found {
-			break
-		}
-	}
-	if strRef.a == nil {
-		t.Fatalf("failed to recover str_val AST reference")
-	}
 	if err := s.AssertSMTLIB2String(script); err != nil {
 		t.Fatalf("AssertSMTLIB2String error: %v", err)
+	}
+	strRef, ok := ctx.ConstDecl("str_val")
+	if !ok || strRef.a == nil {
+		t.Fatalf("failed to recover str_val declaration via ConstDecl")
+	}
+	if sortKey := strRef.Sort().String(); sortKey == "" {
+		t.Fatalf("str_val sort reported empty string")
+	} else if _, ok := ctx.NamedSort(sortKey); !ok {
+		t.Fatalf("NamedSort did not track %s", sortKey)
 	}
 	res, err := s.Check()
 	if err != nil {
@@ -254,48 +239,39 @@ func TestASTModelArraySelectFromDatatype(t *testing.T) {
 (assert (is-OString (atom (select (obj x) "a"))))
 `
 
-	asts, err := ctx.ParseSMTLIB2String(script)
-	if err != nil {
-		t.Fatalf("ParseSMTLIB2String error: %v", err)
-	}
-	var (
-		xRef      AST
-		selectRef AST
-	)
-	for _, root := range asts {
-		root.Walk(func(node AST) bool {
-			if !node.IsApp() {
-				return true
-			}
-			decl := node.Decl()
-			switch decl.Name() {
-			case "x":
-				if node.NumChildren() == 0 && xRef.a == nil {
-					xRef = node
-				}
-			case "select", "Select":
-				if selectRef.a == nil {
-					selectRef = node
-				}
-			}
-			return xRef.a == nil || selectRef.a == nil
-		})
-		if xRef.a != nil && selectRef.a != nil {
-			break
-		}
-	}
-	if xRef.a == nil {
-		t.Fatalf("failed to locate AST for x")
-	}
-	if selectRef.a == nil {
-		t.Fatalf("failed to locate select(obj x \"a\") AST")
-	}
-
 	s := ctx.NewSolver()
 	defer s.Close()
 	if err := s.AssertSMTLIB2String(script); err != nil {
 		t.Fatalf("AssertSMTLIB2String error: %v", err)
 	}
+
+	// Recover declaration for x
+	xRef, ok := ctx.ConstDecl("x")
+	if !ok || xRef.a == nil {
+		// fallback create const of recorded sort if available
+		if sort, okSort := ctx.NamedSort("(OGenType OGenTypeAtom)"); okSort {
+			xRef = ctx.Const("x", sort)
+		} else {
+			t.Fatalf("failed to recover x via ConstDecl and no sort fallback")
+		}
+	}
+
+	// Build select(obj x "a") using recorded function declarations
+	objDecl, okObj := ctx.FuncDeclByName("obj")
+	if !okObj {
+		t.Fatalf("failed to recover obj accessor function declaration")
+	}
+	selectDecl, okSel := ctx.FuncDeclByName("select")
+	if !okSel {
+		// some Z3 builds may use capitalized Select
+		selectDecl, okSel = ctx.FuncDeclByName("Select")
+		if !okSel {
+			t.Fatalf("failed to recover select function declaration")
+		}
+	}
+	objApp := ctx.App(objDecl, xRef)
+	keyLit := ctx.StringVal("a")
+	selectRef := ctx.App(selectDecl, objApp, keyLit)
 	res, err := s.Check()
 	if err != nil {
 		t.Fatalf("solver check error: %v", err)

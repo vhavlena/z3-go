@@ -351,3 +351,83 @@ func TestModelGenerationCases(t *testing.T) {
 		})
 	}
 }
+
+func TestDistinctBuilderUnsat(t *testing.T) {
+	cfg := NewConfig()
+	defer cfg.Close()
+	ctx := NewContext(cfg)
+	defer ctx.Close()
+
+	x := ctx.Const("distinct_x", ctx.IntSort())
+	s := ctx.NewSolver()
+	defer s.Close()
+	s.Assert(Distinct(x, x))
+
+	res, err := s.Check()
+	if err != nil {
+		t.Fatalf("check error: %v", err)
+	}
+	if res != Unsat {
+		t.Fatalf("expected unsat due to distinct(x, x), got %v", res)
+	}
+}
+
+func TestSequenceLengthAndContains(t *testing.T) {
+	cfg := NewConfig()
+	defer cfg.Close()
+	ctx := NewContext(cfg)
+	defer ctx.Close()
+
+	s1 := ctx.Const("seq_s1", ctx.StringSort())
+	s := ctx.NewSolver()
+	defer s.Close()
+
+	s.Assert(Eq(Length(s1), ctx.IntVal(5)))
+	s.Assert(Contains(s1, ctx.StringVal("ab")))
+	s.Assert(Contains(s1, ctx.StringVal("cd")))
+
+	res, err := s.Check()
+	if err != nil {
+		t.Fatalf("check error: %v", err)
+	}
+	if res != Sat {
+		t.Fatalf("expected sat, got %v", res)
+	}
+	m := s.Model()
+	if m == nil {
+		t.Fatalf("expected model")
+	}
+	defer m.Close()
+
+	lenAST := Length(s1)
+	lenVal := m.Eval(lenAST, true)
+	if v, ok := lenVal.AsInt64(); !ok || v != 5 {
+		t.Fatalf("expected length 5, got %s (ok=%v)", lenVal.String(), ok)
+	}
+
+	containsAB := m.Eval(Contains(s1, ctx.StringVal("ab")), true)
+	if val, ok := containsAB.BoolValue(); !ok || !val {
+		t.Fatalf("expected contains \"ab\" to be true, got %s", containsAB.String())
+	}
+	containsCD := m.Eval(Contains(s1, ctx.StringVal("cd")), true)
+	if val, ok := containsCD.BoolValue(); !ok || !val {
+		t.Fatalf("expected contains \"cd\" to be true, got %s", containsCD.String())
+	}
+}
+
+func TestSolverSetOptionUnsupportedType(t *testing.T) {
+	cfg := NewConfig()
+	defer cfg.Close()
+	ctx := NewContext(cfg)
+	defer ctx.Close()
+
+	s := ctx.NewSolver()
+	defer s.Close()
+
+	if err := s.SetOption("timeout", 5); err != nil {
+		t.Fatalf("SetOption timeout int failed: %v", err)
+	}
+	if err := s.SetOption("timeout", struct{}{}); err == nil {
+		t.Fatalf("expected SetOption to reject unsupported value type")
+	}
+}

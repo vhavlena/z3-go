@@ -65,6 +65,7 @@ func (a AST) AsInt64() (int64, bool)  { return 0, false }
 func (a AST) AsStringLiteral() (string, bool) {
 	return "", false
 }
+func (a AST) Sort() Sort { return Sort{} }
 
 func (d FuncDecl) Kind() DeclKind { return DeclOpUninterpreted }
 func (d FuncDecl) Arity() int     { return 0 }
