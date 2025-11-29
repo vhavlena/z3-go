@@ -3,9 +3,9 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/vhavlena/z3-go/ci.yml?branch=main&label=CI)](https://github.com/vhavlena/z3-go/actions)
 [![tag](https://img.shields.io/github/v/tag/vhavlena/z3-go?label=tag)](https://github.com/vhavlena/z3-go/releases)
 
-Minimal Go binding for the Z3 SMT solver.
+Full-featured Go binding for the Z3 SMT solver.
 
-This aims to be a small, idiomatic wrapper over the Z3 C API, suitable to be used as a standalone module.
+Originally conceived as a tiny wrapper, the module now covers a broad slice of the Z3 C API (config/context management, solver/model helpers, AST utilities, and examples) while staying idiomatic to Go.
 
 ## Layout
 - `z3/` — Go package `z3`
