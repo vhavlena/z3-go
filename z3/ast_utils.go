@@ -40,6 +40,7 @@ var astKindNames = map[ASTKind]string{
 	ASTKindUnknown:    "unknown",
 }
 
+// String returns the textual label for the AST kind.
 func (k ASTKind) String() string {
 	if s, ok := astKindNames[k]; ok {
 		return s
@@ -102,6 +103,7 @@ var declKindNames = map[DeclKind]string{
 	DeclOpUninterpreted: "uninterpreted",
 }
 
+// String returns the textual label for the declaration kind.
 func (k DeclKind) String() string {
 	if s, ok := declKindNames[k]; ok {
 		return s
@@ -306,7 +308,9 @@ func (a AST) AsStringLiteral() (string, bool) {
 	return C.GoString(s), true
 }
 
-// ParseSMTLIB2String parses the SMT-LIB2 script and returns the asserted ASTs.
+// ParseSMTLIB2String parses the SMT-LIB2 script and returns the asserted ASTs,
+// recording any encountered sorts/decls so later helper calls (ConstDecl,
+// FuncDeclByName, NamedSort) keep working.
 func (ctx *Context) ParseSMTLIB2String(input string) ([]AST, error) {
 	if ctx == nil || ctx.c == nil {
 		return nil, errors.New("nil context")
