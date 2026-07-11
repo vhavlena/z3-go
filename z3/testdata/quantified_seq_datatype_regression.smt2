@@ -112,41 +112,6 @@
   (OSet1 ((_ map or) (set1 x) (set1 y))))
 (define-fun OSetUnion2 ((x OTypeD2) (y OTypeD2)) OTypeD2
   (OSet2 ((_ map or) (set2 x) (set2 y))))
-(define-fun oto_string_D0 ((x OTypeD0)) String
-  (ite (is-OString x) (str x)
-  (ite (is-ONumber x) (int.to.str (num x))
-  (ite (is-OBoolean x) (ite (bool x) "true" "false")
-  (ite (is-ONull x) "null"
-  "undefined")))))
-(define-fun oto_string_fold_D1 ((acc String) (x OTypeD0)) String
-  (ite (= acc "")
-    (oto_string_D0 x)
-    (str.++ acc ", " (oto_string_D0 x))))
-(define-fun oto_string_D1 ((x OTypeD1)) String
-  (ite (is-Atom1 x) (oto_string_D0 (atom1 x))
-  (ite (is-Wrap1 x) (oto_string_D0 (wrap1 x))
-  (ite (is-OArray1 x) (str.++ "[" (str.++ (seq.fold_left oto_string_fold_D1 "" (arr1 x)) "]"))
-  ""))))
-(define-fun oto_string_fold_D2 ((acc String) (x OTypeD1)) String
-  (ite (= acc "")
-    (oto_string_D1 x)
-    (str.++ acc ", " (oto_string_D1 x))))
-(define-fun oto_string_D2 ((x OTypeD2)) String
-  (ite (is-Atom2 x) (oto_string_D0 (atom2 x))
-  (ite (is-Wrap2 x) (oto_string_D1 (wrap2 x))
-  (ite (is-OArray2 x) (str.++ "[" (str.++ (seq.fold_left oto_string_fold_D2 "" (arr2 x)) "]"))
-  ""))))
-(define-fun sprintf_0 ((fmt String)) String fmt)
-(define-fun sprintf_1 ((fmt String) (s0 String)) String
-  (str.replace fmt "%v" s0))
-(define-fun sprintf_2 ((fmt String) (s0 String) (s1 String)) String
-  (str.replace (str.replace fmt "%v" s0) "%v" s1))
-(define-fun sprintf_3 ((fmt String) (s0 String) (s1 String) (s2 String)) String
-  (str.replace (str.replace (str.replace fmt "%v" s0) "%v" s1) "%v" s2))
-(define-fun sprintf_4 ((fmt String) (s0 String) (s1 String) (s2 String) (s3 String)) String
-  (str.replace (str.replace (str.replace (str.replace fmt "%v" s0) "%v" s1) "%v" s2) "%v" s3))
-(define-fun sprintf_5 ((fmt String) (s0 String) (s1 String) (s2 String) (s3 String) (s4 String)) String
-  (str.replace (str.replace (str.replace (str.replace (str.replace fmt "%v" s0) "%v" s1) "%v" s2) "%v" s3) "%v" s4))
 (declare-fun input () OTypeD2)
 (declare-fun input_arr () OTypeD1)
 (declare-fun input_arr_1 () OTypeD1)
