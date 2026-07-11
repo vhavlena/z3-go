@@ -35,11 +35,41 @@ const (
 	Unsat
 )
 
-// NewSolver creates a fresh solver attached to the context. The returned
-// solver automatically tracks a Go finalizer so leaked solver handles are
-// still released when the GC runs.
+// NewSolver creates a fresh solver attached to the context, backed by Z3's
+// general-purpose combined solver (Z3_mk_solver). This solver runs Z3's
+// tactic-based preprocessing pipeline (simplification, macro-finding, logic
+// auto-detection, etc.) before falling back to the core engine, which is a
+// net win for most problems. However, for some quantified formulas —
+// particularly those mixing quantifiers over datatype-sorted variables with
+// Seq/String theory reasoning — the selected tactic can be dramatically
+// slower (or fail to terminate in practice) than the same assertions run on
+// the plain incremental core. If a formula that should be fast hangs or
+// times out under NewSolver, try NewSimpleSolver on the same assertions
+// before concluding the formula itself is hard.
+//
+// The returned solver automatically tracks a Go finalizer so leaked solver
+// handles are still released when the GC runs.
 func (ctx *Context) NewSolver() *Solver {
 	s := &Solver{ctx, C.Z3_mk_solver(ctx.c)}
+	C.Z3_solver_inc_ref(ctx.c, s.s)
+	runtime.SetFinalizer(s, func(x *Solver) { x.Close() })
+	return s
+}
+
+// NewSimpleSolver creates a fresh solver attached to the context, backed by
+// Z3's basic incremental core (Z3_mk_simple_solver). Unlike NewSolver, it
+// skips the tactic-based preprocessing pipeline and asserts formulas more
+// directly against the core engine. This can avoid pathological slowdowns
+// that NewSolver's tactic selection occasionally hits on certain quantified
+// formulas (see NewSolver's doc comment), but it also loses the
+// simplifications that make NewSolver faster on many other problems. Prefer
+// NewSolver by default; reach for NewSimpleSolver when a specific query is
+// known to hang or time out under the combined solver.
+//
+// The returned solver automatically tracks a Go finalizer so leaked solver
+// handles are still released when the GC runs.
+func (ctx *Context) NewSimpleSolver() *Solver {
+	s := &Solver{ctx, C.Z3_mk_simple_solver(ctx.c)}
 	C.Z3_solver_inc_ref(ctx.c, s.s)
 	runtime.SetFinalizer(s, func(x *Solver) { x.Close() })
 	return s

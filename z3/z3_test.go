@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestIntArithmeticAndModel(t *testing.T) {
@@ -430,4 +431,97 @@ func TestSolverSetOptionUnsupportedType(t *testing.T) {
 	if err := s.SetOption("timeout", struct{}{}); err == nil {
 		t.Fatalf("expected SetOption to reject unsupported value type")
 	}
+}
+
+// TestNewSimpleSolverBasicSat checks that NewSimpleSolver behaves like
+// NewSolver on an ordinary quantifier-free problem: same API, same correct
+// result.
+func TestNewSimpleSolverBasicSat(t *testing.T) {
+	cfg := NewConfig()
+	defer cfg.Close()
+	ctx := NewContext(cfg)
+	defer ctx.Close()
+
+	x := ctx.Const("x", ctx.IntSort())
+	y := ctx.Const("y", ctx.IntSort())
+
+	s := ctx.NewSimpleSolver()
+	defer s.Close()
+
+	s.Assert(Ge(x, ctx.IntVal(0)))
+	s.Assert(Ge(y, ctx.IntVal(0)))
+	s.Assert(Gt(Add(x, y), ctx.IntVal(5)))
+
+	res, err := s.Check()
+	if err != nil {
+		t.Fatalf("check error: %v", err)
+	}
+	if res != Sat {
+		t.Fatalf("expected sat, got %v", res)
+	}
+
+	m := s.Model()
+	if m == nil {
+		t.Fatalf("no model")
+	}
+	defer m.Close()
+
+	xv := m.Eval(x, true)
+	yv := m.Eval(y, true)
+	if xv.a == nil || yv.a == nil {
+		t.Fatalf("model eval nil")
+	}
+}
+
+// TestNewSimpleSolverQuantifiedSeqDatatypeRegression is a regression test for
+// a real formula (extracted from VeriRego's SMT generation for a Rego policy
+// with two independent `some x; input.arr[x]` wildcards) that hangs under
+// NewSolver's combined/tactic-based solver but is solved quickly by
+// NewSimpleSolver's plain incremental core. The formula mixes existential
+// quantifiers over datatype-sorted bound variables with Seq/String theory
+// reasoning (seq.nth/seq.len guarded by ite), which appears to send
+// NewSolver's tactic selection down a non-terminating (or extremely slow)
+// quantifier-instantiation path; see NewSolver's doc comment for the general
+// caveat this test guards against regressing.
+func TestNewSimpleSolverQuantifiedSeqDatatypeRegression(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("testdata", "quantified_seq_datatype_regression.smt2"))
+	if err != nil {
+		t.Fatalf("read testdata: %v", err)
+	}
+
+	cfg := NewConfig()
+	defer cfg.Close()
+	ctx := NewContext(cfg)
+	defer ctx.Close()
+
+	s := ctx.NewSimpleSolver()
+	defer s.Close()
+
+	if err := s.AssertSMTLIB2String(string(content)); err != nil {
+		t.Fatalf("assert smtlib2: %v", err)
+	}
+
+	done := make(chan struct{})
+	var res CheckResult
+	var checkErr error
+	start := time.Now()
+	go func() {
+		res, checkErr = s.Check()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("NewSimpleSolver did not finish within 10s; this formula is expected to solve in milliseconds")
+	}
+	elapsed := time.Since(start)
+
+	if checkErr != nil {
+		t.Fatalf("check error: %v", checkErr)
+	}
+	if res != Sat {
+		t.Fatalf("expected sat, got %v", res)
+	}
+	t.Logf("NewSimpleSolver solved in %v", elapsed)
 }
