@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 env:
-  Z3_VERSION: z3-4.15.4
+  Z3_VERSION: z3-4.16.0
 
 jobs:
   build-test:
