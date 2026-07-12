@@ -4,7 +4,6 @@
 package z3
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -476,95 +475,64 @@ func TestNewSimpleSolverBasicSat(t *testing.T) {
 
 // TestNewSimpleSolverQuantifiedSeqDatatypeRegression is a regression test for
 // a real formula (extracted from VeriRego's SMT generation for a Rego policy
-// with two independent `some x; input.arr[x]` wildcards) that mixes
-// existential quantifiers over datatype-sorted bound variables with
-// Seq/String theory reasoning. This combination sits outside any decidable
-// fragment, so Z3's E-matching/MBQI search order - and therefore whether it
-// finds the (genuine) sat witness before giving up - depends on things like
-// pointer-address-derived hash iteration order. That is not stable across
-// platforms: on macOS/arm64 the plain incremental core (NewSimpleSolver)
-// reliably solves this in milliseconds while the combined/tactic-based
-// solver (NewSolver) hangs; on Ubuntu/amd64 CI it has been observed to flip -
-// the "z3" CLI (which goes through the same tactic pipeline as NewSolver)
-// solves it in well under a second, while NewSimpleSolver's bare core has
-// reported "(incomplete quantifiers)". Since neither construction is
-// reliably fast on both platforms, this test tries NewSimpleSolver across a
-// few smt.random_seed values first (the cheap, usually-sufficient path),
-// then falls back to NewSolver - bounded by Context.Interrupt so a genuine
-// hang doesn't stall the test - for the platforms where that's what actually
-// solves it quickly.
+// with two independent `some x; input.arr[x]` wildcards) that hangs under
+// NewSolver's combined/tactic-based solver but is solved quickly by
+// NewSimpleSolver's plain incremental core; see NewSolver's doc comment for
+// the general caveat this test guards against regressing.
+//
+// This test previously appeared flaky across platforms/CI - occasionally
+// failing with "(incomplete quantifiers)" or "timeout" - which looked like
+// Z3's quantifier-instantiation search order being platform-dependent. The
+// actual cause was unrelated to this formula: Solver.SetOption used to apply
+// options by parsing an SMT-LIB2 "(set-option ...)" string, which Z3 treats
+// as a process-global parameter change rather than a per-solver one. A
+// different test earlier in this file (TestSolverSetOptionUnsupportedType)
+// sets "timeout" to 5ms that way, which leaked into every solver created
+// afterward in the same test binary - including this one - starving it of
+// time regardless of solver construction or random seed. SetOption now uses
+// Z3_solver_set_params, which is genuinely solver-scoped, so a plain,
+// direct check is sufficient here again.
 func TestNewSimpleSolverQuantifiedSeqDatatypeRegression(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join("testdata", "quantified_seq_datatype_regression.smt2"))
 	if err != nil {
 		t.Fatalf("read testdata: %v", err)
 	}
 
-	// attempt asserts the formula into a solver built by newSolver, runs
-	// Check with a bound of timeout (interrupting via Context.Interrupt if
-	// exceeded), and always fully releases the solver/context/config before
-	// returning - so at most one Check is ever in flight.
-	attempt := func(seed int, newSolver func(*Context) *Solver, timeout time.Duration) (CheckResult, error, bool) {
-		cfg := NewConfig()
-		ctx := NewContext(cfg)
-		s := newSolver(ctx)
-		if err := s.SetOption("smt.random_seed", seed); err != nil {
-			t.Fatalf("set random_seed option: %v", err)
-		}
-		if err := s.AssertSMTLIB2String(string(content)); err != nil {
-			t.Fatalf("assert smtlib2: %v", err)
-		}
+	cfg := NewConfig()
+	defer cfg.Close()
+	ctx := NewContext(cfg)
+	defer ctx.Close()
 
-		done := make(chan struct{})
-		var res CheckResult
-		var checkErr error
-		go func() {
-			defer close(done)
-			res, checkErr = s.Check()
-		}()
+	s := ctx.NewSimpleSolver()
+	defer s.Close()
 
-		timedOut := false
-		select {
-		case <-done:
-		case <-time.After(timeout):
-			timedOut = true
-			ctx.Interrupt()
-			<-done // Check must return before Close is safe.
-		}
-
-		s.Close()
-		ctx.Close()
-		cfg.Close()
-		return res, checkErr, timedOut
+	if err := s.AssertSMTLIB2String(string(content)); err != nil {
+		t.Fatalf("assert smtlib2: %v", err)
 	}
 
-	strategies := []struct {
-		name      string
-		newSolver func(*Context) *Solver
-		timeout   time.Duration
-		seeds     int
-	}{
-		{"NewSimpleSolver", (*Context).NewSimpleSolver, 2 * time.Second, 4},
-		{"NewSolver", (*Context).NewSolver, 4 * time.Second, 4},
-	}
+	done := make(chan struct{})
+	var res CheckResult
+	var checkErr error
+	start := time.Now()
+	go func() {
+		defer close(done)
+		res, checkErr = s.Check()
+	}()
 
-	var lastErr error
-	for _, strat := range strategies {
-		for seed := 0; seed < strat.seeds; seed++ {
-			start := time.Now()
-			res, checkErr, timedOut := attempt(seed, strat.newSolver, strat.timeout)
-			switch {
-			case timedOut:
-				lastErr = fmt.Errorf("%s timed out after %v (seed=%d)", strat.name, strat.timeout, seed)
-			case checkErr != nil:
-				lastErr = fmt.Errorf("%s check error (seed=%d): %w", strat.name, seed, checkErr)
-			case res != Sat:
-				lastErr = fmt.Errorf("%s returned %v, want Sat (seed=%d)", strat.name, res, seed)
-			default:
-				t.Logf("%s solved in %v (seed=%d)", strat.name, time.Since(start), seed)
-				return
-			}
-		}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		ctx.Interrupt()
+		<-done
+		t.Fatalf("NewSimpleSolver did not finish within 10s; this formula is expected to solve in milliseconds")
 	}
+	elapsed := time.Since(start)
 
-	t.Fatalf("expected sat from every strategy/seed combination tried; last result: %v", lastErr)
+	if checkErr != nil {
+		t.Fatalf("check error: %v", checkErr)
+	}
+	if res != Sat {
+		t.Fatalf("expected sat, got %v", res)
+	}
+	t.Logf("NewSimpleSolver solved in %v", elapsed)
 }

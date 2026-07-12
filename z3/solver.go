@@ -101,34 +101,70 @@ func (s *Solver) Assert(a AST) {
 	C.Z3_solver_assert(s.ctx.c, s.s, a.a)
 }
 
-// SetOption applies an SMT-LIB (set-option) command on the solver instance by
-// constructing a tiny SMT-LIB snippet and parsing it through Z3. This keeps the
-// API surface small while still exposing every solver tuning knob.
-func (s *Solver) SetOption(name string, value interface{}) error {
+// SetOption sets a tuning parameter on this solver only. Deliberately does
+// NOT go through SMT-LIB2's textual (set-option ...) command: parsing that
+// via Z3_parse_smtlib2_string applies it to Z3's process-global parameter
+// table rather than scoping it to one solver, so it silently leaks into
+// every other Context/Solver created afterward in the same process (this was
+// observed to poison unrelated tests - and would equally poison unrelated
+// production solvers - with e.g. a 5ms global timeout). Instead this builds
+// a Z3_params object and applies it with Z3_solver_set_params, which Z3
+// documents as scoped to the receiving solver.
+//
+// The Z3_params value kind is chosen from value's Go type rather than looked
+// up via Z3_solver_get_param_descrs: that descriptor table only enumerates a
+// solver's own top-level options (timeout, unsat_core, ...) and reports
+// Z3_PK_INVALID for legitimate module-prefixed options like "smt.mbqi" or
+// "smt.random_seed", even though Z3_solver_set_params accepts them fine.
+func (s *Solver) SetOption(name string, value any) error {
 	if s == nil || s.s == nil {
 		return errors.New("nil solver")
 	}
-	var valStr string
+
+	nameC := C.CString(name)
+	defer C.free(unsafe.Pointer(nameC))
+	key := C.Z3_mk_string_symbol(s.ctx.c, nameC)
+
+	params := C.Z3_mk_params(s.ctx.c)
+	C.Z3_params_inc_ref(s.ctx.c, params)
+	defer C.Z3_params_dec_ref(s.ctx.c, params)
+
 	switch v := value.(type) {
-	case string:
-		valStr = v
 	case bool:
-		if v {
-			valStr = "true"
-		} else {
-			valStr = "false"
-		}
-	case int, int32, int64:
-		valStr = fmt.Sprintf("%d", v)
-	case uint, uint32, uint64:
-		valStr = fmt.Sprintf("%d", v)
-	case float32, float64:
-		valStr = fmt.Sprintf("%v", v)
+		C.Z3_params_set_bool(s.ctx.c, params, key, C.bool(v))
+	case int:
+		C.Z3_params_set_uint(s.ctx.c, params, key, C.unsigned(v))
+	case int32:
+		C.Z3_params_set_uint(s.ctx.c, params, key, C.unsigned(v))
+	case int64:
+		C.Z3_params_set_uint(s.ctx.c, params, key, C.unsigned(v))
+	case uint:
+		C.Z3_params_set_uint(s.ctx.c, params, key, C.unsigned(v))
+	case uint32:
+		C.Z3_params_set_uint(s.ctx.c, params, key, C.unsigned(v))
+	case uint64:
+		C.Z3_params_set_uint(s.ctx.c, params, key, C.unsigned(v))
+	case float32:
+		C.Z3_params_set_double(s.ctx.c, params, key, C.double(v))
+	case float64:
+		C.Z3_params_set_double(s.ctx.c, params, key, C.double(v))
+	case string:
+		strC := C.CString(v)
+		defer C.free(unsafe.Pointer(strC))
+		C.Z3_params_set_symbol(s.ctx.c, params, key, C.Z3_mk_string_symbol(s.ctx.c, strC))
 	default:
 		return fmt.Errorf("unsupported option value type %T", v)
 	}
-	cmd := fmt.Sprintf("(set-option :%s %s)", name, valStr)
-	return s.AssertSMTLIB2String(cmd)
+
+	C.Z3_solver_set_params(s.ctx.c, s.s, params)
+	if code := C.Z3_get_error_code(s.ctx.c); code != C.Z3_OK {
+		msg := C.Z3_get_error_msg(s.ctx.c, code)
+		if msg != nil {
+			return errors.New(C.GoString(msg))
+		}
+		return fmt.Errorf("failed to set option %q", name)
+	}
+	return nil
 }
 
 // Push creates a new solver scope, allowing constraints to be added and later
