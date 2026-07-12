@@ -4,7 +4,9 @@
 package z3
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -535,4 +537,117 @@ func TestNewSimpleSolverQuantifiedSeqDatatypeRegression(t *testing.T) {
 		t.Fatalf("expected sat, got %v", res)
 	}
 	t.Logf("NewSimpleSolver solved in %v", elapsed)
+}
+
+// TestSolverCLIQuantifiedSeqDatatypeRegression drives the same formula as
+// TestNewSimpleSolverQuantifiedSeqDatatypeRegression through the actual "z3"
+// executable (skipping if it isn't on PATH) rather than the C API, matching
+// the manual `z3 testdata/....smt2` runs used earlier to diagnose that test.
+func TestSolverCLIQuantifiedSeqDatatypeRegression(t *testing.T) {
+	if _, err := exec.LookPath("z3"); err != nil {
+		t.Skip("z3 executable not found on PATH")
+	}
+
+	content, err := os.ReadFile(filepath.Join("testdata", "quantified_seq_datatype_regression.smt2"))
+	if err != nil {
+		t.Fatalf("read testdata: %v", err)
+	}
+
+	cfg := NewConfig()
+	defer cfg.Close()
+	ctx := NewContext(cfg)
+	defer ctx.Close()
+
+	s := ctx.NewSolverCLI()
+	defer s.Close()
+	if err := s.AssertSMTLIB2String(string(content)); err != nil {
+		t.Fatalf("assert smtlib2: %v", err)
+	}
+
+	start := time.Now()
+	res, err := s.CheckContext(context.Background(), 10*time.Second)
+	if err != nil {
+		t.Fatalf("check error: %v", err)
+	}
+	if res != Sat {
+		t.Fatalf("expected sat, got %v", res)
+	}
+	t.Logf("SolverCLI solved in %v", time.Since(start))
+
+	m := s.Model()
+	if m == nil {
+		t.Fatalf("expected a reconstructed model")
+	}
+	defer m.Close()
+}
+
+// TestSolverCLIBasic exercises SolverCLI's sat/unsat parsing, model
+// reconstruction, and error handling on small formulas, independent of the
+// regression formula above.
+func TestSolverCLIBasic(t *testing.T) {
+	if _, err := exec.LookPath("z3"); err != nil {
+		t.Skip("z3 executable not found on PATH")
+	}
+
+	cfg := NewConfig()
+	defer cfg.Close()
+	ctx := NewContext(cfg)
+	defer ctx.Close()
+
+	t.Run("sat", func(t *testing.T) {
+		s := ctx.NewSolverCLI()
+		defer s.Close()
+		if err := s.AssertSMTLIB2String("(declare-fun x () Int)\n(assert (> x 0))\n(assert (< x 10))\n"); err != nil {
+			t.Fatalf("assert: %v", err)
+		}
+		res, err := s.Check()
+		if err != nil {
+			t.Fatalf("check error: %v", err)
+		}
+		if res != Sat {
+			t.Fatalf("expected sat, got %v", res)
+		}
+		m := s.Model()
+		if m == nil {
+			t.Fatalf("expected a reconstructed model")
+		}
+		defer m.Close()
+
+		x := ctx.Const("x", ctx.IntSort())
+		v := m.Eval(x, true)
+		if v.a == nil {
+			t.Fatalf("model eval for x returned nil")
+		}
+		n, ok := v.AsInt64()
+		if !ok || n <= 0 || n >= 10 {
+			t.Fatalf("expected 0 < x < 10, got %s (ok=%v)", v.String(), ok)
+		}
+	})
+
+	t.Run("unsat", func(t *testing.T) {
+		s := ctx.NewSolverCLI()
+		defer s.Close()
+		if err := s.AssertSMTLIB2String("(declare-fun y () Int)\n(assert (> y 0))\n(assert (< y 0))\n"); err != nil {
+			t.Fatalf("assert: %v", err)
+		}
+		res, err := s.Check()
+		if err != nil {
+			t.Fatalf("check error: %v", err)
+		}
+		if res != Unsat {
+			t.Fatalf("expected unsat, got %v", res)
+		}
+		if m := s.Model(); m != nil {
+			m.Close()
+			t.Fatalf("expected no model for unsat")
+		}
+	})
+
+	t.Run("bad executable path", func(t *testing.T) {
+		s := ctx.NewSolverCLIPath(filepath.Join(t.TempDir(), "no-such-z3-binary"))
+		defer s.Close()
+		if _, err := s.Check(); err == nil {
+			t.Fatalf("expected an error for a nonexistent z3 executable")
+		}
+	})
 }
