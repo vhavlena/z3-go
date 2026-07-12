@@ -103,6 +103,19 @@ func NewContext(cfg *Config) *Context {
 	return ctx
 }
 
+// Interrupt requests that any solver, tactic, or other computation currently
+// running against this context stop as soon as possible, surfacing as an
+// Unknown result with a reason mentioning the interrupt. It is safe to call
+// from a goroutine other than the one running Check, and is the correct way
+// to cancel a Check call that has run past a caller-defined deadline; do not
+// instead just abandon the goroutine and Close the context, since a Check
+// still in flight when Close runs can crash the process.
+func (ctx *Context) Interrupt() {
+	if ctx != nil && ctx.c != nil {
+		C.Z3_interrupt(ctx.c)
+	}
+}
+
 // Close deletes the context and clears the bookkeeping caches (named sorts,
 // declarations, recorded function declarations). After Close returns the
 // context must not be used.

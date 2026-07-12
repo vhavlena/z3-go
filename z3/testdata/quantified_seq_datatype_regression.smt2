@@ -120,3 +120,4 @@
 (declare-fun allow__res_1 () RefHeadResult0)
 (assert (and (= input (OObj2 (store (store ((as const (Array String OTypeD1)) (Wrap1 OUndef)) "back" input_arr) "front" input_arr_1))) (is-OArray1 input_arr) (forall ((BthXY Int)) (let ((DFjPa (arr1 input_arr))) (=> (and (>= BthXY 0) (< BthXY (seq.len DFjPa))) (let ((ps4H2 (seq.nth DFjPa BthXY))) (is-OString ps4H2))))) (is-OArray1 input_arr_1) (forall ((kwo9j Int)) (let ((YfZl5 (arr1 input_arr_1))) (=> (and (>= kwo9j 0) (< kwo9j (seq.len YfZl5))) (let ((p627P (seq.nth YfZl5 kwo9j))) (is-OString p627P)))))))
 (assert (let ((allow__cur_1 (ite (not (= (rhrVal0 allow__res_1) OUndef)) (rhrVal0 allow__res_1) OUndef))) (and (allow_upd_1 OUndef allow__res_1) (= allow allow__cur_1))))
+(check-sat)
