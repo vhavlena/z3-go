@@ -227,7 +227,7 @@ func TestSetOptionQuantifiers(t *testing.T) {
 	if err := s.SetOption("smt.mbqi", true); err != nil {
 		t.Fatalf("SetOption smt.mbqi: %v", err)
 	}
-	if err := s.SetOption("smt.qi.eager_threshold", 0); err != nil {
+	if err := s.SetOption("smt.qi.eager_threshold", 0.0); err != nil {
 		t.Fatalf("SetOption smt.qi.eager_threshold: %v", err)
 	}
 
@@ -432,6 +432,61 @@ func TestSolverSetOptionUnsupportedType(t *testing.T) {
 	}
 	if err := s.SetOption("timeout", struct{}{}); err == nil {
 		t.Fatalf("expected SetOption to reject unsupported value type")
+	}
+}
+
+// TestSolverSetOptionWrongKindRejected is a regression test for SetOption
+// silently no-op'ing when a value's Go type maps to the wrong Z3_params kind
+// for the target option: "timeout" is a uint-kind solver option, so setting
+// it with a bool must be rejected rather than silently ignored.
+func TestSolverSetOptionWrongKindRejected(t *testing.T) {
+	cfg := NewConfig()
+	defer cfg.Close()
+	ctx := NewContext(cfg)
+	defer ctx.Close()
+
+	s := ctx.NewSolver()
+	defer s.Close()
+
+	if err := s.SetOption("timeout", true); err == nil {
+		t.Fatalf("expected SetOption to reject a bool value for the uint-kind \"timeout\" option")
+	}
+}
+
+// TestSolverSetOptionUnknownNameRejected is a regression test for SetOption
+// silently no-op'ing on a misspelled/nonexistent option name instead of
+// returning an error.
+func TestSolverSetOptionUnknownNameRejected(t *testing.T) {
+	cfg := NewConfig()
+	defer cfg.Close()
+	ctx := NewContext(cfg)
+	defer ctx.Close()
+
+	s := ctx.NewSolver()
+	defer s.Close()
+
+	if err := s.SetOption("totally_bogus_option_name_xyz", true); err == nil {
+		t.Fatalf("expected SetOption to reject an unknown option name")
+	}
+}
+
+// TestSolverSetOptionUintOutOfRange is a regression test for int64/uint64
+// option values being silently truncated (and sign-wrapped, for negatives)
+// into Z3_params_set_uint's 32-bit unsigned parameter instead of erroring.
+func TestSolverSetOptionUintOutOfRange(t *testing.T) {
+	cfg := NewConfig()
+	defer cfg.Close()
+	ctx := NewContext(cfg)
+	defer ctx.Close()
+
+	s := ctx.NewSolver()
+	defer s.Close()
+
+	if err := s.SetOption("timeout", int64(-1)); err == nil {
+		t.Fatalf("expected SetOption to reject a negative timeout instead of wrapping it to a huge uint32")
+	}
+	if err := s.SetOption("timeout", int64(5_000_000_000)); err == nil {
+		t.Fatalf("expected SetOption to reject a timeout value that overflows uint32 instead of truncating it")
 	}
 }
 
@@ -650,4 +705,106 @@ func TestSolverCLIBasic(t *testing.T) {
 			t.Fatalf("expected an error for a nonexistent z3 executable")
 		}
 	})
+}
+
+// TestSolverCLISurvivesRejectedOption is a regression test for CheckContext
+// only looking at the first line of the subprocess's stdout: an invalid
+// SetOption command makes z3 print an "(error ...)" line (on stdout, not
+// stderr) before it still runs check-sat and solves the query, and that sat
+// result must not be discarded as a generic subprocess failure.
+func TestSolverCLISurvivesRejectedOption(t *testing.T) {
+	if _, err := exec.LookPath("z3"); err != nil {
+		t.Skip("z3 executable not found on PATH")
+	}
+
+	cfg := NewConfig()
+	defer cfg.Close()
+	ctx := NewContext(cfg)
+	defer ctx.Close()
+
+	s := ctx.NewSolverCLI()
+	defer s.Close()
+
+	if err := s.SetOption("totally_bogus_option_name_xyz", true); err != nil {
+		t.Fatalf("SetOption: %v", err)
+	}
+	if err := s.AssertSMTLIB2String("(declare-fun x () Int)\n(assert (> x 0))\n(assert (< x 10))\n"); err != nil {
+		t.Fatalf("assert: %v", err)
+	}
+
+	res, err := s.Check()
+	if err != nil {
+		t.Fatalf("check error: %v", err)
+	}
+	if res != Sat {
+		t.Fatalf("expected sat despite the rejected option, got %v", res)
+	}
+}
+
+// TestSolverCLIQuotesSpecialConstantNames is a regression test for constant
+// names being spliced into the "(get-value (...))" request without SMT-LIB2
+// |...| quoting: a declared symbol containing a space must still have its
+// value retrieved and reconstructed into the model.
+func TestSolverCLIQuotesSpecialConstantNames(t *testing.T) {
+	if _, err := exec.LookPath("z3"); err != nil {
+		t.Skip("z3 executable not found on PATH")
+	}
+
+	cfg := NewConfig()
+	defer cfg.Close()
+	ctx := NewContext(cfg)
+	defer ctx.Close()
+
+	s := ctx.NewSolverCLI()
+	defer s.Close()
+
+	if err := s.AssertSMTLIB2String("(declare-fun |my var| () Int)\n(assert (> |my var| 0))\n(assert (< |my var| 10))\n"); err != nil {
+		t.Fatalf("assert: %v", err)
+	}
+
+	res, err := s.Check()
+	if err != nil {
+		t.Fatalf("check error: %v", err)
+	}
+	if res != Sat {
+		t.Fatalf("expected sat, got %v", res)
+	}
+	m := s.Model()
+	if m == nil {
+		t.Fatalf("expected a reconstructed model covering the quoted symbol")
+	}
+	defer m.Close()
+}
+
+// TestSolverCLIModelIncompleteForArityFunctions is a regression test for
+// SolverCLI.Model() silently omitting uninterpreted functions with real
+// arity with no way for the caller to detect the gap: ModelIncomplete must
+// report true whenever such a function was present in a sat formula.
+func TestSolverCLIModelIncompleteForArityFunctions(t *testing.T) {
+	if _, err := exec.LookPath("z3"); err != nil {
+		t.Skip("z3 executable not found on PATH")
+	}
+
+	cfg := NewConfig()
+	defer cfg.Close()
+	ctx := NewContext(cfg)
+	defer ctx.Close()
+
+	s := ctx.NewSolverCLI()
+	defer s.Close()
+
+	if err := s.AssertSMTLIB2String("(declare-fun f (Int) Int)\n(assert (= (f 0) 1))\n"); err != nil {
+		t.Fatalf("assert: %v", err)
+	}
+
+	res, err := s.Check()
+	if err != nil {
+		t.Fatalf("check error: %v", err)
+	}
+	if res != Sat {
+		t.Fatalf("expected sat, got %v", res)
+	}
+	if !s.ModelIncomplete() {
+		t.Fatalf("expected ModelIncomplete to report true for a formula using an arity-1 function")
+	}
 }

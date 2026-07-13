@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // SolverCLI computes Check results by running the actual "z3" executable as
@@ -32,32 +33,35 @@ import (
 // Model() is reconstructed, not returned by the subprocess directly, and
 // leans on Z3 itself rather than a hand-rolled SMT-LIB model parser: after a
 // sat result, SolverCLI finds the currently declared 0-ary (constant)
-// symbols natively (walking the real ASTs via Z3_solver_get_assertions and
-// AST.Walk/Decl, not by scanning printed text), asks the subprocess for
-// their values via SMT-LIB's (get-value ...), and feeds those values -
-// unparsed, exactly as z3 printed them - straight into Z3's own
-// Z3_parse_smtlib2_string as equality assertions against a fresh, trivial
-// native solver, which is what actually interprets them into a genuine
-// *Model. The only custom code involved is a small top-level-paren splitter
-// that locates the boundaries between values in the subprocess's response
-// text (needed because that response isn't itself valid SMT-LIB command
-// syntax Z3's parser can consume directly) - it never interprets what a
-// value means. Function symbols with real arity are not reconstructed and
-// will simply be absent from the resulting model. If reconstruction fails
-// for any reason, Model() returns nil, the same as it would for a Solver
-// that hasn't found a model.
+// symbols natively (walking the real ASTs via Z3_solver_get_assertions,
+// without the ref-counting AST.Walk/AST.Child helpers - see constantNames),
+// asks the subprocess for their values via SMT-LIB's (get-value ...), and
+// feeds those values - unparsed, exactly as z3 printed them - straight into
+// Z3's own Z3_parse_smtlib2_string as equality assertions against a fresh,
+// trivial native solver, which is what actually interprets them into a
+// genuine *Model. The only custom code involved is a small top-level-paren
+// splitter that locates the boundaries between values in the subprocess's
+// response text (needed because that response isn't itself valid SMT-LIB
+// command syntax Z3's parser can consume directly) - it never interprets
+// what a value means. Function symbols with real arity are not
+// reconstructed and will simply be absent from the resulting model; when
+// that happens ModelIncomplete reports true so callers can detect it rather
+// than silently trusting a partial model. If reconstruction fails for any
+// reason, Model() returns nil, the same as it would for a Solver that
+// hasn't found a model.
 //
 // SolverCLI is not safe for concurrent use by multiple goroutines.
 type SolverCLI struct {
 	ctx    *Context
 	path   string
 	mirror *Solver // tracks declarations/assertions for CLI serialization only
-	// unusedOptions are relayed to the subprocess script but never applied to
+	// options are relayed to the subprocess script but never applied to
 	// mirror, since mirror is never itself checked against the real formula.
 	options []string
 
-	lastModel  *Model
-	lastReason string
+	lastModel        *Model
+	lastReason       string
+	lastModelPartial bool
 }
 
 // NewSolverCLI creates a SolverCLI attached to ctx that invokes "z3"
@@ -154,34 +158,96 @@ func (s *SolverCLI) ReasonUnknown() string {
 }
 
 // constantNames returns the names of every 0-ary (constant) function
-// application reachable from mirror's currently asserted formulas, found by
-// walking their real ASTs via Z3_solver_get_assertions/AST.Walk/Decl -
-// rather than by text-scanning the printed script for "declare-fun" forms.
-func (s *SolverCLI) constantNames() []string {
+// application reachable from mirror's currently asserted formulas, plus
+// whether any uninterpreted function application with real arity (whose
+// value this package cannot reconstruct into a model, see the type doc
+// comment) was also found.
+//
+// This walks the real ASTs via Z3_solver_get_assertions directly with raw
+// cgo calls rather than through AST.Walk/AST.Child: those helpers call
+// Z3_inc_ref on every visited child with no matching Z3_dec_ref anywhere,
+// which is fine for their existing single-shot callers but would leak an
+// unbounded number of Z3-internal references here, since CheckContext calls
+// this on every single Check (including repeated Checks around Push/Pop).
+// A child AST is already kept alive by its parent's own internal
+// representation for the duration of this synchronous, read-only walk, so
+// no inc_ref is needed at all.
+func (s *SolverCLI) constantNames() (names []string, hasArityFuncs bool) {
 	vec := C.Z3_solver_get_assertions(s.ctx.c, s.mirror.s)
 	if vec == nil {
-		return nil
+		return nil, false
 	}
 	C.Z3_ast_vector_inc_ref(s.ctx.c, vec)
 	defer C.Z3_ast_vector_dec_ref(s.ctx.c, vec)
 
 	seen := make(map[string]bool)
-	var names []string
+	var stack []C.Z3_ast
 	n := int(C.Z3_ast_vector_size(s.ctx.c, vec))
 	for i := 0; i < n; i++ {
-		root := AST{ctx: s.ctx, a: C.Z3_ast_vector_get(s.ctx.c, vec, C.uint(i))}
-		root.Walk(func(node AST) bool {
-			if node.IsApp() && node.NumChildren() == 0 && node.Decl().Kind() == DeclOpUninterpreted {
-				name := node.Decl().Name()
+		stack = append(stack, C.Z3_ast_vector_get(s.ctx.c, vec, C.uint(i)))
+	}
+	for len(stack) > 0 {
+		node := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if node == nil || !bool(C.Z3_is_app(s.ctx.c, node)) {
+			continue
+		}
+		app := C.Z3_to_app(s.ctx.c, node)
+		numArgs := int(C.Z3_get_app_num_args(s.ctx.c, app))
+		decl := C.Z3_get_app_decl(s.ctx.c, app)
+		if C.Z3_get_decl_kind(s.ctx.c, decl) == C.Z3_OP_UNINTERPRETED {
+			name := symbolToString(s.ctx, C.Z3_get_decl_name(s.ctx.c, decl))
+			if numArgs == 0 {
 				if name != "" && !seen[name] {
 					seen[name] = true
 					names = append(names, name)
 				}
+			} else {
+				hasArityFuncs = true
 			}
-			return true
-		})
+		}
+		for i := 0; i < numArgs; i++ {
+			stack = append(stack, C.Z3_get_app_arg(s.ctx.c, app, C.uint(i)))
+		}
 	}
-	return names
+	return names, hasArityFuncs
+}
+
+// smtlibSimpleSymbolChar reports whether r is legal in an unquoted SMT-LIB2
+// "simple symbol" token.
+func smtlibSimpleSymbolChar(r rune) bool {
+	if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		return true
+	}
+	switch r {
+	case '~', '!', '@', '$', '%', '^', '&', '*', '_', '-', '+', '=', '<', '>', '.', '?', '/':
+		return true
+	}
+	return false
+}
+
+// quoteSMTLIBSymbol renders name as a valid SMT-LIB2 symbol token, adding
+// |...| quoting when needed. Reports ok=false if name can't be safely
+// represented (e.g. it contains a literal '|' or '\\', which quoted symbols
+// cannot escape).
+func quoteSMTLIBSymbol(name string) (quoted string, ok bool) {
+	if name == "" {
+		return "", false
+	}
+	simple := !unicode.IsDigit(rune(name[0]))
+	for _, r := range name {
+		if !smtlibSimpleSymbolChar(r) {
+			simple = false
+			break
+		}
+	}
+	if simple {
+		return name, true
+	}
+	if strings.ContainsAny(name, "|\\") {
+		return "", false
+	}
+	return "|" + name + "|", true
 }
 
 // CheckContext behaves like Check but bounds the subprocess by ctx and, if
@@ -194,9 +260,19 @@ func (s *SolverCLI) CheckContext(ctx context.Context, timeout time.Duration) (Ch
 		s.lastModel = nil
 	}
 	s.lastReason = ""
+	s.lastModelPartial = false
 
 	full := C.GoString(C.Z3_solver_to_string(s.ctx.c, s.mirror.s))
-	names := s.constantNames()
+	rawNames, hasArityFuncs := s.constantNames()
+
+	var names []string
+	for _, n := range rawNames {
+		if q, ok := quoteSMTLIBSymbol(n); ok {
+			names = append(names, q)
+		} else {
+			hasArityFuncs = true // can't be safely retrieved either; model will be partial
+		}
+	}
 
 	var script strings.Builder
 	for _, opt := range s.options {
@@ -229,24 +305,39 @@ func (s *SolverCLI) CheckContext(ctx context.Context, timeout time.Duration) (Ch
 	runErr := cmd.Run()
 
 	out := strings.TrimRight(stdout.String(), "\n")
-	firstLine, rest, _ := strings.Cut(out, "\n")
-	firstLine = strings.TrimSpace(firstLine)
 
+	// The result of (check-sat) is not necessarily the first line of
+	// stdout: z3 prints diagnostics for a bad preceding (set-option ...) or
+	// other command to stdout (not stderr), and still runs check-sat
+	// afterward. Scan every line for the actual sat/unsat/unknown response
+	// instead of assuming it's the first one, so a rejected option upstream
+	// doesn't cause a solved query's result to be discarded.
+	lines := strings.Split(out, "\n")
+	resultLine := -1
 	var res CheckResult
-	switch firstLine {
-	case "sat":
-		res = Sat
-	case "unsat":
-		res = Unsat
-	case "unknown":
-		res = Unknown
-		s.lastReason = strings.TrimSpace(rest)
-	default:
+	for i, ln := range lines {
+		switch strings.TrimSpace(ln) {
+		case "sat":
+			res, resultLine = Sat, i
+		case "unsat":
+			res, resultLine = Unsat, i
+		case "unknown":
+			res, resultLine = Unknown, i
+		default:
+			continue
+		}
+		break
+	}
+
+	if resultLine == -1 {
 		if ctx.Err() != nil {
 			return Unknown, fmt.Errorf("z3 subprocess did not finish in time: %w", ctx.Err())
 		}
 		if runErr != nil {
 			msg := strings.TrimSpace(stderr.String())
+			if msg == "" {
+				msg = strings.TrimSpace(out)
+			}
 			if msg == "" {
 				msg = runErr.Error()
 			}
@@ -258,9 +349,15 @@ func (s *SolverCLI) CheckContext(ctx context.Context, timeout time.Duration) (Ch
 		return Unknown, fmt.Errorf("unrecognized z3 output: %q", out)
 	}
 
+	rest := strings.Join(lines[resultLine+1:], "\n")
+	if res == Unknown {
+		s.lastReason = strings.TrimSpace(rest)
+	}
+
 	if res == Sat && len(names) > 0 {
 		s.lastModel = reconstructModel(s.ctx, full, rest)
 	}
+	s.lastModelPartial = res == Sat && hasArityFuncs
 	return res, nil
 }
 
@@ -270,4 +367,15 @@ func (s *SolverCLI) CheckContext(ctx context.Context, timeout time.Duration) (Ch
 // caller (or allowed to leak for GC finalization), same as Solver.Model.
 func (s *SolverCLI) Model() *Model {
 	return s.lastModel
+}
+
+// ModelIncomplete reports whether the most recent sat Check's model is known
+// to be missing entries: either a real-arity uninterpreted function (which
+// this package cannot reconstruct, see the type doc comment) was present in
+// the formula, or a declared constant's name couldn't be safely represented
+// as an SMT-LIB2 symbol and so its value was never requested. Callers that
+// need a guarantee the model is complete should check this rather than
+// assuming a non-nil Model() covers every declaration.
+func (s *SolverCLI) ModelIncomplete() bool {
+	return s.lastModelPartial
 }

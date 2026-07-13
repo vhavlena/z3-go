@@ -12,6 +12,7 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"math"
 	"runtime"
 	"unsafe"
 )
@@ -116,6 +117,17 @@ func (s *Solver) Assert(a AST) {
 // solver's own top-level options (timeout, unsat_core, ...) and reports
 // Z3_PK_INVALID for legitimate module-prefixed options like "smt.mbqi" or
 // "smt.random_seed", even though Z3_solver_set_params accepts them fine.
+//
+// Before applying, the built Z3_params is run through Z3_params_validate
+// against the solver's own descriptor table. Despite Z3_param_descrs_get_kind
+// reporting Z3_PK_INVALID for a module-prefixed name looked up directly (the
+// reason this function can't use it to pick a Z3_params kind up front),
+// Z3_params_validate resolves module-prefixed names against their owning
+// module's own descriptors and does raise an error for both a misspelled
+// option (top-level or module-prefixed) and a wrong-kind value for a
+// legitimate one - e.g. passing a Go int for the double-valued
+// "smt.qi.eager_threshold" is rejected here, so double-valued module options
+// must be set with a float32/float64.
 func (s *Solver) SetOption(name string, value any) error {
 	if s == nil || s.s == nil {
 		return errors.New("nil solver")
@@ -133,17 +145,37 @@ func (s *Solver) SetOption(name string, value any) error {
 	case bool:
 		C.Z3_params_set_bool(s.ctx.c, params, key, C.bool(v))
 	case int:
-		C.Z3_params_set_uint(s.ctx.c, params, key, C.unsigned(v))
+		u, err := int64ToParamUint(int64(v))
+		if err != nil {
+			return fmt.Errorf("option %q: %w", name, err)
+		}
+		C.Z3_params_set_uint(s.ctx.c, params, key, u)
 	case int32:
-		C.Z3_params_set_uint(s.ctx.c, params, key, C.unsigned(v))
+		u, err := int64ToParamUint(int64(v))
+		if err != nil {
+			return fmt.Errorf("option %q: %w", name, err)
+		}
+		C.Z3_params_set_uint(s.ctx.c, params, key, u)
 	case int64:
-		C.Z3_params_set_uint(s.ctx.c, params, key, C.unsigned(v))
+		u, err := int64ToParamUint(v)
+		if err != nil {
+			return fmt.Errorf("option %q: %w", name, err)
+		}
+		C.Z3_params_set_uint(s.ctx.c, params, key, u)
 	case uint:
-		C.Z3_params_set_uint(s.ctx.c, params, key, C.unsigned(v))
+		u, err := uint64ToParamUint(uint64(v))
+		if err != nil {
+			return fmt.Errorf("option %q: %w", name, err)
+		}
+		C.Z3_params_set_uint(s.ctx.c, params, key, u)
 	case uint32:
 		C.Z3_params_set_uint(s.ctx.c, params, key, C.unsigned(v))
 	case uint64:
-		C.Z3_params_set_uint(s.ctx.c, params, key, C.unsigned(v))
+		u, err := uint64ToParamUint(v)
+		if err != nil {
+			return fmt.Errorf("option %q: %w", name, err)
+		}
+		C.Z3_params_set_uint(s.ctx.c, params, key, u)
 	case float32:
 		C.Z3_params_set_double(s.ctx.c, params, key, C.double(v))
 	case float64:
@@ -156,6 +188,18 @@ func (s *Solver) SetOption(name string, value any) error {
 		return fmt.Errorf("unsupported option value type %T", v)
 	}
 
+	descrs := C.Z3_solver_get_param_descrs(s.ctx.c, s.s)
+	C.Z3_param_descrs_inc_ref(s.ctx.c, descrs)
+	C.Z3_params_validate(s.ctx.c, params, descrs)
+	C.Z3_param_descrs_dec_ref(s.ctx.c, descrs)
+	if code := C.Z3_get_error_code(s.ctx.c); code != C.Z3_OK {
+		msg := C.Z3_get_error_msg(s.ctx.c, code)
+		if msg != nil {
+			return errors.New(C.GoString(msg))
+		}
+		return fmt.Errorf("invalid option %q", name)
+	}
+
 	C.Z3_solver_set_params(s.ctx.c, s.s, params)
 	if code := C.Z3_get_error_code(s.ctx.c); code != C.Z3_OK {
 		msg := C.Z3_get_error_msg(s.ctx.c, code)
@@ -165,6 +209,24 @@ func (s *Solver) SetOption(name string, value any) error {
 		return fmt.Errorf("failed to set option %q", name)
 	}
 	return nil
+}
+
+// int64ToParamUint range-checks v against Z3_params_set_uint's 32-bit
+// unsigned parameter, rather than silently truncating/sign-wrapping it.
+func int64ToParamUint(v int64) (C.unsigned, error) {
+	if v < 0 || v > math.MaxUint32 {
+		return 0, fmt.Errorf("value %d out of range for a uint32 option", v)
+	}
+	return C.unsigned(v), nil
+}
+
+// uint64ToParamUint range-checks v against Z3_params_set_uint's 32-bit
+// unsigned parameter, rather than silently truncating it.
+func uint64ToParamUint(v uint64) (C.unsigned, error) {
+	if v > math.MaxUint32 {
+		return 0, fmt.Errorf("value %d out of range for a uint32 option", v)
+	}
+	return C.unsigned(v), nil
 }
 
 // Push creates a new solver scope, allowing constraints to be added and later
