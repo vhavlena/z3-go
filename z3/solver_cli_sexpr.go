@@ -140,6 +140,36 @@ func nonAssertPreamble(script string) string {
 	return b.String()
 }
 
+// stripControlCommands returns script with every top-level solver-control
+// command dropped, keeping only what Z3_parse_smtlib2_string itself turns
+// into declarations/definitions/assertions. This mirrors what
+// AssertSMTLIB2String/File actually feed into mirror: Z3's SMT-LIB2 parser
+// returns an ast_vector of assertions and ignores commands like push/pop/
+// check-sat/get-value/set-option/exit/reset outright, so a caller's script
+// containing one of those (e.g. a trailing "(check-sat)" left over from a
+// standalone .smt2 file) must not be forwarded to the CLI subprocess
+// verbatim - CheckContext appends its own check-sat/get-value afterward, and
+// a stray control command earlier in rawSegments would otherwise duplicate
+// or reorder those and break result/model parsing.
+func stripControlCommands(script string) string {
+	var b strings.Builder
+	for _, form := range splitTopLevelForms(script) {
+		children := topLevelChildren(form)
+		if len(children) == 0 {
+			continue
+		}
+		switch children[0] {
+		case "check-sat", "check-sat-assuming", "get-value",
+			"get-model", "push", "pop", "set-option", "exit", "reset":
+			continue
+		default:
+			b.WriteString(form)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
 // reconstructModel turns the response to "(get-value (names...))" - a
 // top-level list of (name value) pairs - into a genuine *Model by replaying
 // each pair as an equality assertion (alongside the original declarations,
