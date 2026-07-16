@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -54,12 +55,33 @@ import (
 type SolverCLI struct {
 	ctx    *Context
 	path   string
-	mirror *Solver // tracks declarations/assertions for CLI serialization only
+	mirror *Solver // tracks declarations/assertions for constant discovery only
 	// options are relayed to the subprocess script but never applied to
 	// mirror, since mirror is never itself checked against the real formula.
 	options []string
 
+	// rawSegments holds the script text actually sent to the z3 subprocess,
+	// in the form each assertion was originally given: AssertSMTLIB2String
+	// and AssertSMTLIB2File segments are kept verbatim, and Assert(AST)
+	// segments are individually printed. This is deliberately not the same
+	// as mirror's Z3_solver_to_string output: parsing text into mirror via
+	// Z3's C API and reprinting it does not preserve define-fun structure
+	// sharing (macros are inlined at parse time and never reconstructed),
+	// which has been observed to turn formulas the z3 binary solves
+	// instantly on the original text into ones that take orders of
+	// magnitude longer when reprinted. Sending rawSegments instead keeps
+	// SolverCLI's whole premise intact: reproducing the z3 executable's own
+	// default behavior on the formula as originally written.
+	rawSegments []string
+	// scopeStack records len(rawSegments) at each Push, mirroring how
+	// mirror tracks its own scopes, so Pop can drop exactly the raw
+	// segments asserted since the corresponding Push.
+	scopeStack []int
+
 	lastModel        *Model
+	lastModelBuilt   bool // whether lastModel has been (attempted to be) reconstructed for the current sat result
+	lastDeclScript   string
+	lastGetValueOut  string
 	lastReason       string
 	lastModelPartial bool
 }
@@ -81,17 +103,34 @@ func (ctx *Context) NewSolverCLIPath(path string) *SolverCLI {
 // created in the same context as the solver.
 func (s *SolverCLI) Assert(a AST) {
 	s.mirror.Assert(a)
+	s.rawSegments = append(s.rawSegments, fmt.Sprintf("(assert %s)", a.String()))
 }
 
 // AssertSMTLIB2String parses an SMT-LIB2 string and asserts the resulting
-// commands, mirroring Solver.AssertSMTLIB2String.
+// commands, mirroring Solver.AssertSMTLIB2String. The original input text is
+// also kept verbatim (see rawSegments) and is what actually gets sent to the
+// z3 subprocess on Check.
 func (s *SolverCLI) AssertSMTLIB2String(input string) error {
-	return s.mirror.AssertSMTLIB2String(input)
+	if err := s.mirror.AssertSMTLIB2String(input); err != nil {
+		return err
+	}
+	s.rawSegments = append(s.rawSegments, stripControlCommands(input))
+	return nil
 }
 
-// AssertSMTLIB2File mirrors Solver.AssertSMTLIB2File.
+// AssertSMTLIB2File mirrors Solver.AssertSMTLIB2File. The file's contents are
+// also kept verbatim (see rawSegments) and are what actually get sent to the
+// z3 subprocess on Check.
 func (s *SolverCLI) AssertSMTLIB2File(path string) error {
-	return s.mirror.AssertSMTLIB2File(path)
+	if err := s.mirror.AssertSMTLIB2File(path); err != nil {
+		return err
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	s.rawSegments = append(s.rawSegments, stripControlCommands(string(content)))
+	return nil
 }
 
 // SetOption records an SMT-LIB "(set-option :name value)" command to run
@@ -123,11 +162,17 @@ func (s *SolverCLI) SetOption(name string, value any) error {
 // Push creates a new solver scope, mirroring Solver.Push.
 func (s *SolverCLI) Push() {
 	s.mirror.Push()
+	s.scopeStack = append(s.scopeStack, len(s.rawSegments))
 }
 
 // Pop removes solver scopes, mirroring Solver.Pop.
 func (s *SolverCLI) Pop(n uint) {
 	s.mirror.Pop(n)
+	for i := uint(0); i < n && len(s.scopeStack) > 0; i++ {
+		mark := s.scopeStack[len(s.scopeStack)-1]
+		s.scopeStack = s.scopeStack[:len(s.scopeStack)-1]
+		s.rawSegments = s.rawSegments[:mark]
+	}
 }
 
 // Close releases the resources backing this solver (including its
@@ -143,6 +188,16 @@ func (s *SolverCLI) Close() {
 	if s.mirror != nil {
 		s.mirror.Close()
 	}
+}
+
+func (s *SolverCLI) resetLastModelState() {
+	if s.lastModel != nil {
+		s.lastModel.Close()
+		s.lastModel = nil
+	}
+	s.lastModelBuilt = false
+	s.lastDeclScript = ""
+	s.lastGetValueOut = ""
 }
 
 // Check runs the accumulated assertions through the z3 executable, mirroring
@@ -255,14 +310,11 @@ func quoteSMTLIBSymbol(name string) (quoted string, ok bool) {
 // as a hard subprocess-kill deadline, so a z3 build that ignores -T: still
 // cannot hang the caller).
 func (s *SolverCLI) CheckContext(ctx context.Context, timeout time.Duration) (CheckResult, error) {
-	if s.lastModel != nil {
-		s.lastModel.Close()
-		s.lastModel = nil
-	}
+	s.resetLastModelState()
 	s.lastReason = ""
 	s.lastModelPartial = false
 
-	full := C.GoString(C.Z3_solver_to_string(s.ctx.c, s.mirror.s))
+	full := strings.Join(s.rawSegments, "\n")
 	rawNames, hasArityFuncs := s.constantNames()
 
 	var names []string
@@ -355,7 +407,16 @@ func (s *SolverCLI) CheckContext(ctx context.Context, timeout time.Duration) (Ch
 	}
 
 	if res == Sat && len(names) > 0 {
-		s.lastModel = reconstructModel(s.ctx, full, rest)
+		// Reconstruction is deferred to Model(): it replays get-value's
+		// response against the declarations by running a native Check() of
+		// its own (see reconstructModel), which hits the very tactic-based
+		// Solver slowness SolverCLI exists to route around. Most callers
+		// only need the sat/unsat/unknown status, so paying that cost on
+		// every sat result - rather than only when a caller actually asks
+		// for the model - turned "check instantly, don't need a witness"
+		// queries into multi-second ones for no benefit.
+		s.lastDeclScript = full
+		s.lastGetValueOut = rest
 	}
 	s.lastModelPartial = res == Sat && hasArityFuncs
 	return res, nil
@@ -365,7 +426,16 @@ func (s *SolverCLI) CheckContext(ctx context.Context, timeout time.Duration) (Ch
 // nil - mirroring Solver.Model's signature and its convention of returning
 // nil when no model is available. The returned model must be closed by the
 // caller (or allowed to leak for GC finalization), same as Solver.Model.
+//
+// Reconstruction happens lazily on first call (see CheckContext) and is
+// cached until the next Check/CheckContext or Close.
 func (s *SolverCLI) Model() *Model {
+	if !s.lastModelBuilt {
+		s.lastModelBuilt = true
+		if s.lastGetValueOut != "" {
+			s.lastModel = reconstructModel(s.ctx, s.lastDeclScript, s.lastGetValueOut)
+		}
+	}
 	return s.lastModel
 }
 
