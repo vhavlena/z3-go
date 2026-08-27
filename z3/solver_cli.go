@@ -35,7 +35,7 @@ import (
 // leans on Z3 itself rather than a hand-rolled SMT-LIB model parser: after a
 // sat result, SolverCLI finds the currently declared 0-ary (constant)
 // symbols natively (walking the real ASTs via Z3_solver_get_assertions,
-// without the ref-counting AST.Walk/AST.Child helpers - see constantNames),
+// without the ref-counting AST.Walk/AST.Child helpers - see liveSymbols),
 // asks the subprocess for their values via SMT-LIB's (get-value ...), and
 // feeds those values - unparsed, exactly as z3 printed them - straight into
 // Z3's own Z3_parse_smtlib2_string as equality assertions against a fresh,
@@ -78,6 +78,21 @@ type SolverCLI struct {
 	// segments asserted since the corresponding Push.
 	scopeStack []int
 
+	// astDeclNames collects the name of every uninterpreted symbol ever
+	// passed to Assert(AST), across all scopes. Unlike AssertSMTLIB2String/
+	// File, whose text already carries its own declare-fun commands,
+	// Assert(AST) only ever prints the assertion term itself (see rawSegments'
+	// doc comment on why reprinting a full solver dump instead isn't safe),
+	// so the subprocess - a brand-new z3 process that has seen none of
+	// mirror's declarations - would otherwise be asked to assert a formula
+	// over undeclared symbols. CheckContext cross-references this set
+	// against what's actually live in mirror right now (liveSymbols) and
+	// synthesizes "(declare-fun ...)" commands for the overlap; this needs
+	// no separate Push/Pop bookkeeping of its own because mirror's own scope
+	// tracking already decides what's live, and a name popped out of mirror
+	// simply stops appearing there even though it stays in this set.
+	astDeclNames map[string]bool
+
 	lastModel        *Model
 	lastModelBuilt   bool // whether lastModel has been (attempted to be) reconstructed for the current sat result
 	lastDeclScript   string
@@ -103,7 +118,43 @@ func (ctx *Context) NewSolverCLIPath(path string) *SolverCLI {
 // created in the same context as the solver.
 func (s *SolverCLI) Assert(a AST) {
 	s.mirror.Assert(a)
+	s.recordASTDeclNames(a)
 	s.rawSegments = append(s.rawSegments, fmt.Sprintf("(assert %s)", a.String()))
+}
+
+// recordASTDeclNames walks a's subtree collecting the name of every
+// uninterpreted function/constant symbol it uses into s.astDeclNames (see
+// that field's doc comment), so CheckContext knows to synthesize a
+// declaration for it. This is a raw cgo walk rather than AST.Walk/AST.Child
+// for the same ref-counting reason liveSymbols uses one (see its doc
+// comment): a's own children are already kept alive by a for the duration
+// of this synchronous read-only walk.
+func (s *SolverCLI) recordASTDeclNames(a AST) {
+	if a.a == nil {
+		return
+	}
+	if s.astDeclNames == nil {
+		s.astDeclNames = make(map[string]bool)
+	}
+	stack := []C.Z3_ast{a.a}
+	for len(stack) > 0 {
+		node := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if node == nil || !bool(C.Z3_is_app(s.ctx.c, node)) {
+			continue
+		}
+		app := C.Z3_to_app(s.ctx.c, node)
+		numArgs := int(C.Z3_get_app_num_args(s.ctx.c, app))
+		decl := C.Z3_get_app_decl(s.ctx.c, app)
+		if C.Z3_get_decl_kind(s.ctx.c, decl) == C.Z3_OP_UNINTERPRETED {
+			if name := symbolToString(s.ctx, C.Z3_get_decl_name(s.ctx.c, decl)); name != "" {
+				s.astDeclNames[name] = true
+			}
+		}
+		for i := 0; i < numArgs; i++ {
+			stack = append(stack, C.Z3_get_app_arg(s.ctx.c, app, C.uint(i)))
+		}
+	}
 }
 
 // AssertSMTLIB2String parses an SMT-LIB2 string and asserts the resulting
@@ -212,30 +263,38 @@ func (s *SolverCLI) ReasonUnknown() string {
 	return s.lastReason
 }
 
-// constantNames returns the names of every 0-ary (constant) function
-// application reachable from mirror's currently asserted formulas, plus
-// whether any uninterpreted function application with real arity (whose
-// value this package cannot reconstruct into a model, see the type doc
-// comment) was also found.
-//
-// This walks the real ASTs via Z3_solver_get_assertions directly with raw
-// cgo calls rather than through AST.Walk/AST.Child: those helpers call
+// liveSymbols walks the real ASTs via Z3_solver_get_assertions directly with
+// raw cgo calls rather than through AST.Walk/AST.Child: those helpers call
 // Z3_inc_ref on every visited child with no matching Z3_dec_ref anywhere,
 // which is fine for their existing single-shot callers but would leak an
 // unbounded number of Z3-internal references here, since CheckContext calls
-// this on every single Check (including repeated Checks around Push/Pop).
-// A child AST is already kept alive by its parent's own internal
-// representation for the duration of this synchronous, read-only walk, so
-// no inc_ref is needed at all.
-func (s *SolverCLI) constantNames() (names []string, hasArityFuncs bool) {
+// this on every single Check (including repeated Checks around Push/Pop). A
+// child AST is already kept alive by its parent's own internal
+// representation for the duration of this synchronous, read-only walk, so no
+// inc_ref is needed at all.
+//
+// It walks mirror's currently asserted formulas (respecting
+// whatever Push/Pop scope mirror is in right now) collecting: names, the
+// 0-ary constants eligible for "(get-value ...)"; hasArityFuncs, whether any
+// uninterpreted application with real arity (whose value this package cannot
+// reconstruct into a model, see the type doc comment) was also found; and
+// declCmds, synthesized "(declare-fun ...)" commands for every live symbol
+// - of any arity - whose name is in s.astDeclNames, i.e. one that was
+// introduced via Assert(AST) and so has no declaration of its own anywhere
+// in rawSegments (see astDeclNames' doc comment). A name not in
+// astDeclNames came from AssertSMTLIB2String/File instead, whose verbatim
+// text in rawSegments already declares it, so it's deliberately skipped here
+// to avoid sending a duplicate declaration the subprocess would reject.
+func (s *SolverCLI) liveSymbols() (names []string, hasArityFuncs bool, declCmds []string) {
 	vec := C.Z3_solver_get_assertions(s.ctx.c, s.mirror.s)
 	if vec == nil {
-		return nil, false
+		return nil, false, nil
 	}
 	C.Z3_ast_vector_inc_ref(s.ctx.c, vec)
 	defer C.Z3_ast_vector_dec_ref(s.ctx.c, vec)
 
-	seen := make(map[string]bool)
+	seen := make(map[string]bool)     // names already added to `names`
+	declared := make(map[string]bool) // names already added to `declCmds`
 	var stack []C.Z3_ast
 	n := int(C.Z3_ast_vector_size(s.ctx.c, vec))
 	for i := 0; i < n; i++ {
@@ -260,12 +319,23 @@ func (s *SolverCLI) constantNames() (names []string, hasArityFuncs bool) {
 			} else {
 				hasArityFuncs = true
 			}
+			if name != "" && !declared[name] && s.astDeclNames[name] {
+				declared[name] = true
+				if q, ok := quoteSMTLIBSymbol(name); ok {
+					var domain []string
+					for i := 0; i < numArgs; i++ {
+						domain = append(domain, (Sort{ctx: s.ctx, s: C.Z3_get_domain(s.ctx.c, decl, C.uint(i))}).String())
+					}
+					rng := (Sort{ctx: s.ctx, s: C.Z3_get_range(s.ctx.c, decl)}).String()
+					declCmds = append(declCmds, fmt.Sprintf("(declare-fun %s (%s) %s)", q, strings.Join(domain, " "), rng))
+				}
+			}
 		}
 		for i := 0; i < numArgs; i++ {
 			stack = append(stack, C.Z3_get_app_arg(s.ctx.c, app, C.uint(i)))
 		}
 	}
-	return names, hasArityFuncs
+	return names, hasArityFuncs, declCmds
 }
 
 // smtlibSimpleSymbolChar reports whether r is legal in an unquoted SMT-LIB2
@@ -315,7 +385,7 @@ func (s *SolverCLI) CheckContext(ctx context.Context, timeout time.Duration) (Ch
 	s.lastModelPartial = false
 
 	full := strings.Join(s.rawSegments, "\n")
-	rawNames, hasArityFuncs := s.constantNames()
+	rawNames, hasArityFuncs, declCmds := s.liveSymbols()
 
 	var names []string
 	for _, n := range rawNames {
@@ -327,8 +397,26 @@ func (s *SolverCLI) CheckContext(ctx context.Context, timeout time.Duration) (Ch
 	}
 
 	var script strings.Builder
+	// Vanilla z3 produces models by default in "-in" mode without being
+	// asked, but z3-noodler does not: without this, its "(get-value ...)"
+	// response is just an error ("model is not available, did you forget to
+	// enable model generation with 'model=true'?") and Model() silently
+	// returns nil. Writing it unconditionally ahead of the caller's own
+	// options is a no-op for vanilla z3 and keeps SolverCLI working
+	// identically against either; a caller that explicitly wants models off
+	// can still override it since s.options (via SetOption) is written
+	// after and SMT-LIB2 options apply in order.
+	script.WriteString("(set-option :produce-models true)\n")
 	for _, opt := range s.options {
 		script.WriteString(opt)
+		script.WriteByte('\n')
+	}
+	// Declares symbols introduced via Assert(AST) ahead of the assertions
+	// that use them (see astDeclNames' and liveSymbols' doc comments) - the
+	// subprocess is a brand-new z3 process that has never seen mirror's
+	// declarations, only whatever text rawSegments carries.
+	for _, cmd := range declCmds {
+		script.WriteString(cmd)
 		script.WriteByte('\n')
 	}
 	script.WriteString(full)
@@ -415,7 +503,17 @@ func (s *SolverCLI) CheckContext(ctx context.Context, timeout time.Duration) (Ch
 		// every sat result - rather than only when a caller actually asks
 		// for the model - turned "check instantly, don't need a witness"
 		// queries into multi-second ones for no benefit.
-		s.lastDeclScript = full
+		// declCmds isn't part of full (Assert(AST) deliberately keeps
+		// rawSegments to just the assertion text - see astDeclNames' doc
+		// comment), but reconstructModel needs it: it extracts declarations
+		// from lastDeclScript to replay get-value's response against a
+		// fresh native solver, and a symbol Assert(AST) introduced has no
+		// declaration anywhere else.
+		if len(declCmds) > 0 {
+			s.lastDeclScript = strings.Join(declCmds, "\n") + "\n" + full
+		} else {
+			s.lastDeclScript = full
+		}
 		s.lastGetValueOut = rest
 	}
 	s.lastModelPartial = res == Sat && hasArityFuncs

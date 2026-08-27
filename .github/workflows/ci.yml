@@ -81,3 +81,80 @@ jobs:
         run: go build ./...
       - name: Test
         run: go test ./... -v
+
+  noodler-build-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      NOODLER_PREFIX: ${{ github.workspace }}/.z3-noodler
+      NOODLER_REF: main
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Cache z3-noodler build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/.z3-noodler
+            ${{ github.workspace }}/.z3-noodler-src
+          key: ${{ runner.os }}-z3-noodler-${{ env.NOODLER_REF }}-${{ hashFiles('.github/workflows/ci.yml') }}
+
+      - name: Install build dependencies (Ubuntu)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build python3 git pkg-config
+
+      - name: Install build dependencies (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          brew update
+          brew install cmake ninja pkg-config
+
+      # z3-noodler is a fork of Z3 that isn't packaged by any OS package
+      # manager or available via pkg-config (see the README's "Z3-Noodler
+      # support" section), so it's always built from source here. Its own
+      # CMake build fetches and statically links the Mata automata library
+      # it depends on, so no separate step is needed for that.
+      - name: Build z3-noodler from source
+        run: |
+          set -euo pipefail
+
+          if [ -x "${NOODLER_PREFIX}/bin/z3" ]; then
+            echo "Using cached z3-noodler at ${NOODLER_PREFIX}"
+          else
+            rm -rf "${NOODLER_PREFIX}" "${{ github.workspace }}/.z3-noodler-src"
+            git clone --depth 1 --branch "${NOODLER_REF}" https://github.com/VeriFIT/z3-noodler.git "${{ github.workspace }}/.z3-noodler-src"
+            cmake -S "${{ github.workspace }}/.z3-noodler-src" -B "${{ github.workspace }}/.z3-noodler-src/build" \
+              -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX="${NOODLER_PREFIX}" \
+              -DZ3_BUILD_LIBZ3_SHARED=ON
+            cmake --build "${{ github.workspace }}/.z3-noodler-src/build" --parallel
+            cmake --install "${{ github.workspace }}/.z3-noodler-src/build"
+          fi
+
+          test -x "${NOODLER_PREFIX}/bin/z3"
+          "${NOODLER_PREFIX}/bin/z3" --version
+
+      - name: Export z3-noodler environment
+        run: |
+          echo "CGO_CFLAGS=-I${NOODLER_PREFIX}/include" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=-L${NOODLER_PREFIX}/lib" >> "$GITHUB_ENV"
+          echo "Z3_NOODLER_BIN=${NOODLER_PREFIX}/bin/z3" >> "$GITHUB_ENV"
+          if [ "${{ startsWith(matrix.os, 'macos') }}" = "true" ]; then
+            echo "DYLD_LIBRARY_PATH=${NOODLER_PREFIX}/lib:${DYLD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          else
+            echo "LD_LIBRARY_PATH=${NOODLER_PREFIX}/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build (noodler)
+        run: go build -tags noodler ./...
+      - name: Test (noodler)
+        run: go test -tags noodler ./z3/... -v
