@@ -89,7 +89,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     env:
       NOODLER_PREFIX: ${{ github.workspace }}/.z3-noodler
-      NOODLER_REF: main
+      NOODLER_REF: devel
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
