@@ -550,25 +550,6 @@ func TestNewSimpleSolverBasicSat(t *testing.T) {
 // Z3_solver_set_params, which is genuinely solver-scoped, so a plain,
 // direct check is sufficient here again.
 func TestNewSimpleSolverQuantifiedSeqDatatypeRegression(t *testing.T) {
-	if isNoodlerBuild {
-		// Not a quantifier/tactic issue - z3-noodler handles quantifiers
-		// over plain datatypes fine (verified directly against `z3 -in`
-		// with a quantified, non-string datatype formula: solves sat). The
-		// actual cause, also reproduced directly against `z3 -in` outside
-		// this package, is narrower: this formula's datatypes use both the
-		// generic `(Seq OTypeD0)` sort and the built-in `String` sort (via
-		// `(Seq String)` and an `OString (str String)` constructor), and
-		// z3-noodler's string theory rejects that combination outright -
-		// `(get-info :reason-unknown)` on it reports exactly
-		// `"Sorts (Seq OTypeD0) and String are incompatible"` - regardless
-		// of the quantifiers. That looks like a z3-noodler limitation
-		// (Z3-Noodler is a general SMT solver like Z3, not restricted to
-		// quantifier-free string constraints); this skip just avoids
-		// asserting a vanilla-Z3-specific outcome against a fork with a
-		// known gap here, not a claim noodler can't do general SMT.
-		t.Skip("z3-noodler's string theory rejects mixing a non-String (Seq ...) sort with String in the same formula (reason-unknown: \"Sorts (Seq OTypeD0) and String are incompatible\"); unrelated to the quantifiers here")
-	}
-
 	content, err := os.ReadFile(filepath.Join("testdata", "quantified_seq_datatype_regression.smt2"))
 	if err != nil {
 		t.Fatalf("read testdata: %v", err)
@@ -618,16 +599,6 @@ func TestNewSimpleSolverQuantifiedSeqDatatypeRegression(t *testing.T) {
 // executable (skipping if it isn't on PATH) rather than the C API, matching
 // the manual `z3 testdata/....smt2` runs used earlier to diagnose that test.
 func TestSolverCLIQuantifiedSeqDatatypeRegression(t *testing.T) {
-	if isNoodlerBuild {
-		// Same root cause as TestNewSimpleSolverQuantifiedSeqDatatypeRegression's
-		// skip (see its comment): this formula mixes a non-String `Seq` sort
-		// with `String`, which z3-noodler's string theory rejects outright,
-		// independent of quantifiers or of which "z3" answers the
-		// subprocess. Confirmed directly with `z3 -in` on this exact file
-		// against the noodler build: reason-unknown is
-		// "Sorts (Seq OTypeD0) and String are incompatible".
-		t.Skip("z3-noodler's string theory rejects mixing a non-String (Seq ...) sort with String in the same formula (reason-unknown: \"Sorts (Seq OTypeD0) and String are incompatible\"); unrelated to the quantifiers here")
-	}
 	if _, err := exec.LookPath("z3"); err != nil {
 		t.Skip("z3 executable not found on PATH")
 	}
