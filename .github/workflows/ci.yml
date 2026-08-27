@@ -146,7 +146,7 @@ jobs:
       - name: Export z3-noodler environment
         run: |
           echo "CGO_CFLAGS=-I${NOODLER_PREFIX}/include" >> "$GITHUB_ENV"
-          echo "CGO_LDFLAGS=-L${NOODLER_PREFIX}/lib" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=-L${NOODLER_PREFIX}/lib -lz3" >> "$GITHUB_ENV"
           echo "Z3_NOODLER_BIN=${NOODLER_PREFIX}/bin/z3" >> "$GITHUB_ENV"
           if [ "${{ startsWith(matrix.os, 'macos') }}" = "true" ]; then
             echo "DYLD_LIBRARY_PATH=${NOODLER_PREFIX}/lib:${DYLD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
