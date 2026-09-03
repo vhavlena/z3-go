@@ -146,3 +146,5 @@ noodler := ctx.NewSolverCLIPath("/path/to/z3-noodler/build/z3")
 
 `go test -tags noodler ./z3/...` also picks up a small set of noodler-specific regression tests (`z3_noodler_test.go`); set `Z3_NOODLER_BIN` to a noodler `z3` executable to include the ones that exercise `SolverCLI` against it.
 
+Swapping out the string theory is not supposed to change anything else, so `nonseq_test.go` holds a table of SMT-LIB2 queries that stay entirely outside the seq/str theory - linear and nonlinear integer/real arithmetic, bit-vectors, arrays, uninterpreted functions and sorts, algebraic datatypes, floating-point, and quantifiers - each with its expected sat/unsat result plus consequences that must be entailed (checked by refuting their negation, so a "sat" reached for the wrong reasons doesn't pass). It runs on every build, so a vanilla-Z3 `go test` pins the expected answers and `go test -tags noodler` asserts the fork agrees on all of them, natively and (with `Z3_NOODLER_BIN` set) through the noodler executable.
+

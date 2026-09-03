@@ -151,3 +151,26 @@ func TestNoodlerSolverCLI(t *testing.T) {
 		t.Fatalf("expected x = %q, got %q", "xyz", got)
 	}
 }
+
+// TestNoodlerNonSeqFormulasCLI drives the seq-free formula table from
+// nonseq_test.go through SolverCLI pointed at a z3-noodler executable. The
+// native half of that validation needs no test of its own here: the table's
+// TestNonSeqFormulasNative/SimpleSolver already run against the noodler
+// library whenever the package is built with -tags noodler. What this adds
+// is the subprocess path, where the binary under test is pinned to noodler
+// via Z3_NOODLER_BIN rather than being whatever "z3" happens to be on PATH
+// (which is what TestNonSeqFormulasCLI uses).
+//
+// Replacing the string theory is not supposed to change any of these
+// answers; see nonseq_test.go for what the table covers and why entailment
+// (not just sat/unsat) is checked.
+func TestNoodlerNonSeqFormulasCLI(t *testing.T) {
+	path := noodlerCLIPath(t)
+
+	cfg := NewConfig()
+	defer cfg.Close()
+	ctx := NewContext(cfg)
+	defer ctx.Close()
+
+	runNonSeqFormulas(t, func() nonSeqSolver { return ctx.NewSolverCLIPath(path) })
+}
