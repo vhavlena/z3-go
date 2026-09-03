@@ -507,10 +507,10 @@ func TestNonSeqFormulasSimpleSolver(t *testing.T) {
 }
 
 // TestNonSeqFormulasCLI validates the table through the "z3" executable on
-// PATH. Under -tags noodler that executable is whatever plain "z3" resolves
-// to, which need not be a noodler build - see
-// TestNoodlerNonSeqFormulasCLI in z3_noodler_test.go for the variant pinned
-// to a noodler binary via Z3_NOODLER_BIN.
+// PATH, whichever flavor that is: CI's noodler job puts its own build there,
+// but nothing here requires that, so see TestNoodlerNonSeqFormulasCLI in
+// z3_noodler_test.go for the variant pinned to a noodler binary via
+// Z3_NOODLER_BIN.
 func TestNonSeqFormulasCLI(t *testing.T) {
 	if _, err := exec.LookPath("z3"); err != nil {
 		t.Skip("z3 executable not found on PATH")
