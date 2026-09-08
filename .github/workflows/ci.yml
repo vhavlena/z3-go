@@ -81,3 +81,122 @@ jobs:
         run: go build ./...
       - name: Test
         run: go test ./... -v
+
+  noodler-build-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      NOODLER_PREFIX: ${{ github.workspace }}/.z3-noodler
+      NOODLER_REF: devel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      # NOODLER_REF is a branch, i.e. a moving target, so the cache must be
+      # keyed on the commit it currently points at rather than on the branch
+      # name: keying on the name alone means the first successful run pins
+      # that day's z3-noodler into the cache and every later run restores it,
+      # silently testing against a stale fork build no matter how far devel
+      # has moved. The checkout below then uses this exact commit, so what is
+      # cached always matches the key it was stored under.
+      - name: Resolve z3-noodler revision
+        id: noodler-rev
+        run: |
+          set -euo pipefail
+          sha=$(git ls-remote https://github.com/VeriFIT/z3-noodler.git "refs/heads/${NOODLER_REF}" | cut -f1)
+          test -n "${sha}"
+          echo "${NOODLER_REF} is at ${sha}"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache z3-noodler build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/.z3-noodler
+            ${{ github.workspace }}/.z3-noodler-src
+          key: ${{ runner.os }}-z3-noodler-${{ steps.noodler-rev.outputs.sha }}-${{ hashFiles('.github/workflows/ci.yml') }}
+
+      - name: Install build dependencies (Ubuntu)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build python3 git pkg-config
+
+      - name: Install build dependencies (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          brew update
+          brew install cmake ninja pkg-config
+
+      # z3-noodler is a fork of Z3 that isn't packaged by any OS package
+      # manager or available via pkg-config (see the README's "Z3-Noodler
+      # support" section), so it's always built from source here. Its own
+      # CMake build fetches and statically links the Mata automata library
+      # it depends on, so no separate step is needed for that.
+      - name: Build z3-noodler from source
+        env:
+          NOODLER_SHA: ${{ steps.noodler-rev.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ -x "${NOODLER_PREFIX}/bin/z3" ]; then
+            echo "Using cached z3-noodler at ${NOODLER_PREFIX}"
+          else
+            rm -rf "${NOODLER_PREFIX}" "${{ github.workspace }}/.z3-noodler-src"
+            # Fetch the resolved commit itself rather than "--branch
+            # ${NOODLER_REF}", so the build cannot end up one commit off the
+            # cache key if devel moves between the step above and this one.
+            git init -q "${{ github.workspace }}/.z3-noodler-src"
+            git -C "${{ github.workspace }}/.z3-noodler-src" remote add origin https://github.com/VeriFIT/z3-noodler.git
+            git -C "${{ github.workspace }}/.z3-noodler-src" fetch -q --depth 1 origin "${NOODLER_SHA}"
+            git -C "${{ github.workspace }}/.z3-noodler-src" checkout -q FETCH_HEAD
+            cmake -S "${{ github.workspace }}/.z3-noodler-src" -B "${{ github.workspace }}/.z3-noodler-src/build" \
+              -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX="${NOODLER_PREFIX}" \
+              -DZ3_BUILD_LIBZ3_SHARED=ON
+            cmake --build "${{ github.workspace }}/.z3-noodler-src/build" --parallel
+            cmake --install "${{ github.workspace }}/.z3-noodler-src/build"
+          fi
+
+          test -x "${NOODLER_PREFIX}/bin/z3"
+          "${NOODLER_PREFIX}/bin/z3" --version
+
+          # z3 prints the commit it was built from as its "build hashcode",
+          # so this is a direct check that the binary about to be tested -
+          # freshly built or restored from cache - really is NOODLER_REF's
+          # current tip. A mismatch means the cache key stopped tracking the
+          # revision, which is exactly the failure this job cannot detect
+          # from test results alone: the tests just start disagreeing with
+          # the fork's actual behavior.
+          if ! "${NOODLER_PREFIX}/bin/z3" --version | grep -q "${NOODLER_SHA}"; then
+            echo "::error::z3-noodler at ${NOODLER_PREFIX} was not built from ${NOODLER_REF} (${NOODLER_SHA})"
+            exit 1
+          fi
+
+      - name: Export z3-noodler environment
+        run: |
+          echo "CGO_CFLAGS=-I${NOODLER_PREFIX}/include" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=-L${NOODLER_PREFIX}/lib -lz3" >> "$GITHUB_ENV"
+          echo "Z3_NOODLER_BIN=${NOODLER_PREFIX}/bin/z3" >> "$GITHUB_ENV"
+          # Put the noodler build on PATH as well, so the tests that resolve
+          # a bare "z3" (TestNonSeqFormulasCLI and the TestSolverCLI* group)
+          # exercise the fork through the subprocess path instead of skipping
+          # for lack of any z3 executable, which is what they did in this job
+          # before - five tests reporting "z3 executable not found on PATH".
+          echo "${NOODLER_PREFIX}/bin" >> "$GITHUB_PATH"
+          if [ "${{ startsWith(matrix.os, 'macos') }}" = "true" ]; then
+            echo "DYLD_LIBRARY_PATH=${NOODLER_PREFIX}/lib:${DYLD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          else
+            echo "LD_LIBRARY_PATH=${NOODLER_PREFIX}/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build (noodler)
+        run: go build -tags noodler ./...
+      - name: Test (noodler)
+        run: go test -tags noodler ./z3/... -v
