@@ -228,16 +228,41 @@ func symbolToString(ctx *Context, sym C.Z3_symbol) string {
 // ASTVisitFunc controls AST traversal; returning false skips visiting the node's children.
 type ASTVisitFunc func(AST) bool
 
-// Walk performs a depth-first traversal over the AST.
+// Walk performs a depth-first traversal over the AST, invoking fn exactly once
+// per distinct node.
+//
+// Z3 terms are hash-consed DAGs, not trees: an identical subterm created twice
+// is one node with several parents, and the SMT-LIB2 parser inlines every
+// define-fun body as a macro, so a script whose definitions refer to each other
+// produces very heavy sharing from very little text. Traversing that as if it
+// were a tree costs a visit per distinct *path* to each node, which is
+// exponential in the nesting depth of the sharing -- for a real 8KB SMT-LIB
+// script with 13 interlocking define-funs, Walk took over 20 seconds, while the
+// z3 executable parsed and solved the very same file in 59ms.
+//
+// Nodes are therefore deduplicated by AST identity, which is exactly the
+// hash-consed pointer: a node reached again by another path is skipped, along
+// with the subtree below it that has already been visited through it. Callers
+// see each node once no matter how many parents it has -- the right contract
+// for collecting facts about the term (which is what recordSortsFromAST, the
+// one in-tree caller, does), though a caller wanting a per-path callback would
+// need its own traversal.
 func (a AST) Walk(fn ASTVisitFunc) {
 	if fn == nil || a.ctx == nil || a.a == nil {
 		return
 	}
 	stack := []AST{a}
+	seen := make(map[C.Z3_ast]struct{})
 	for len(stack) > 0 {
 		idx := len(stack) - 1
 		node := stack[idx]
 		stack = stack[:idx]
+		if node.a != nil {
+			if _, dup := seen[node.a]; dup {
+				continue
+			}
+			seen[node.a] = struct{}{}
+		}
 		if !fn(node) {
 			continue
 		}

@@ -3,7 +3,10 @@
 
 package z3
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestASTTraversalFromSMTLIB(t *testing.T) {
 	cfg := NewConfig()
@@ -313,4 +316,41 @@ func TestASTModelArraySelectFromDatatype(t *testing.T) {
 	if _, ok := atom.Child(0).AsStringLiteral(); !ok {
 		t.Fatalf("expected to read string literal from selected entry")
 	}
+}
+
+// TestWalkVisitsSharedNodesOnce pins Walk's per-node (not per-path) contract on
+// a term with deliberate sharing: each definition below refers to the previous
+// one twice, so the fully expanded tree has 2^levels leaves while the DAG the
+// parser actually builds has only a couple of dozen distinct nodes.
+func TestWalkVisitsSharedNodesOnce(t *testing.T) {
+	ctx := NewContext(nil)
+	defer ctx.Close()
+
+	const levels = 24
+	script := "(declare-const x Int)\n(define-fun f0 () Int x)\n"
+	for i := 1; i <= levels; i++ {
+		script += fmt.Sprintf("(define-fun f%d () Int (+ f%d f%d))\n", i, i-1, i-1)
+	}
+	script += fmt.Sprintf("(assert (> f%d 0))\n", levels)
+
+	asserts, err := ctx.ParseSMTLIB2String(script)
+	if err != nil {
+		t.Fatalf("ParseSMTLIB2String error: %v", err)
+	}
+	if len(asserts) != 1 {
+		t.Fatalf("got %d assertions, want 1", len(asserts))
+	}
+
+	visits := 0
+	asserts[0].Walk(func(AST) bool {
+		visits++
+		return true
+	})
+	// Per distinct node this term is a few dozen nodes; per path it would be
+	// over 2^24. Anything near the latter means the visited set is gone.
+	if visits > 1000 {
+		t.Fatalf("Walk made %d visits over a term with %d shared levels; "+
+			"shared nodes are being re-visited once per path", visits, levels)
+	}
+	t.Logf("Walk visits: %d (per-path would be ~2^%d)", visits, levels)
 }
